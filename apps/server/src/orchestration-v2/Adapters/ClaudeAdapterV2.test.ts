@@ -6492,7 +6492,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             uuid: "00000000-0000-4000-8000-000000000974",
             session_id: WAKE_NATIVE_SESSION,
           }),
-          // The outer subagent's progress doesn't wait for the nested start.
+          // The outer subagent's progress and own work don't wait for the
+          // nested start.
           claudeSdkFrame({
             type: "system",
             subtype: "task_progress",
@@ -6501,6 +6502,24 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             uuid: "00000000-0000-4000-8000-000000000984",
             session_id: WAKE_NATIVE_SESSION,
           }),
+          ...makeSubagentAssistantFrames({
+            parentToolUseId: OUTER_TOOL_USE_ID,
+            uuid: "00000000-0000-4000-8000-000000000988",
+            messageId: "msg_idle_outer_working",
+            text: "OUTER_WORKING",
+          }),
+        ]) {
+          yield* Queue.offer(harness.sdkMessages, frame);
+        }
+        yield* awaitUntil(
+          () =>
+            harness.events.some(
+              (event) => event.type === "message.updated" && event.message.text === "OUTER_WORKING",
+            ),
+          "outer work while the nested start waits",
+        );
+        assert.lengthOf(harness.continuationRequests, 0);
+        for (const frame of [
           ...makeSubagentAssistantFrames({
             parentToolUseId: NESTED_TOOL_USE_ID,
             uuid: "00000000-0000-4000-8000-000000000975",
@@ -6585,7 +6604,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.equal(nested?.parentNodeId, outer?.id);
         assert.deepEqual(
           subagentRouting(harness.events, []).assistantTexts(outer?.childThreadId ?? undefined),
-          ["OUTER_DONE"],
+          ["OUTER_WORKING", "OUTER_DONE"],
         );
       }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
     ),

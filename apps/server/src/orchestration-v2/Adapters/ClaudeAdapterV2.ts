@@ -5632,21 +5632,17 @@ export function makeClaudeAdapterV2(
           }
           // A subagent's task_started still in the wake buffer registers or
           // re-opens it only when a continuation drains it, and only that run
-          // stores the work that follows. Frames after it keep their order;
-          // progress only waits on its own subagent's start.
-          const bufferedStarts = new Set(
-            ((yield* Ref.get(wakeBuffers)).get(nativeThreadId)?.messages ?? []).flatMap((entry) =>
-              entry.type === "system" &&
-              entry.subtype === "task_started" &&
-              !isClaudeNonSubagentTask(entry)
-                ? [entry.task_id]
-                : [],
-            ),
+          // stores the work that follows. So that subagent's own frames, and
+          // the result of the Agent call that launched it, wait behind it.
+          const bufferedStarts = (
+            (yield* Ref.get(wakeBuffers)).get(nativeThreadId)?.messages ?? []
+          ).flatMap((entry) =>
+            entry.type === "system" &&
+            entry.subtype === "task_started" &&
+            !isClaudeNonSubagentTask(entry)
+              ? [entry]
+              : [],
           );
-          const isProgress = message.type === "system" && message.subtype === "task_progress";
-          if (isProgress ? bufferedStarts.has(message.task_id) : bufferedStarts.size > 0) {
-            return null;
-          }
           const parentToolUseId = parentToolUseIdFromSdkMessage(message);
           const taskId =
             message.type === "system" && message.subtype === "task_progress"
@@ -5654,6 +5650,24 @@ export function makeClaudeAdapterV2(
               : parentToolUseId === null
                 ? undefined
                 : (yield* Ref.get(sessionSubagentTaskIdsByToolUseId)).get(parentToolUseId);
+          const returnedToolUseIds = new Set(
+            [
+              ...claudeToolResultBlocksFromAssistantMessage(message),
+              ...claudeToolResultBlocksFromUserMessage(message),
+            ].map((toolResult) => toolResult.tool_use_id),
+          );
+          if (
+            bufferedStarts.some(
+              (start) =>
+                start.task_id === taskId ||
+                // Without the launching call's id, any frame may be its result.
+                (start.tool_use_id === undefined
+                  ? returnedToolUseIds.size > 0
+                  : returnedToolUseIds.has(start.tool_use_id)),
+            )
+          ) {
+            return null;
+          }
           const subagent =
             taskId === undefined
               ? undefined
