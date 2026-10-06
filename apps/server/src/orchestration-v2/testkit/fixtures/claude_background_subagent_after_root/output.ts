@@ -26,8 +26,8 @@ function commandTexts(projection: OrchestrationV2ThreadProjection): ReadonlyArra
 }
 
 // Every frame the background subagent emits arrives after the root turn's
-// result, so it reaches the adapter through the wake buffer and drains into
-// the continuation turn. None of it may land in the parent thread.
+// result, while the root is idle. Its work reaches its child thread as it
+// runs, before its end wakes the root, and none of it lands in the parent.
 export function assertClaudeBackgroundSubagentAfterRootOutput(
   result: OrchestratorV2ScenarioResult,
   transcript: ProviderReplayTranscript,
@@ -97,4 +97,26 @@ export function assertClaudeBackgroundSubagentAfterRootOutput(
       `subagent command ${command} must be in the child thread`,
     );
   }
+  // The continuation is queued as soon as the wake arrives; it drains the
+  // wake buffer when it starts.
+  const continuationStartIndex = result.domainEvents.findIndex(
+    (event) =>
+      event.type === "run.updated" &&
+      event.payload.id === projection.runs[1]?.id &&
+      event.payload.status === "starting",
+  );
+  const firstCommandDoneIndex = result.domainEvents.findIndex(
+    (event) =>
+      event.type === "turn-item.updated" &&
+      event.payload.threadId === subagent.childThreadId &&
+      event.payload.type === "command_execution" &&
+      event.payload.status === "completed" &&
+      JSON.stringify(event.payload.input).includes(SUBAGENT_COMMANDS[0] ?? ""),
+  );
+  assert.isAtLeast(firstCommandDoneIndex, 0);
+  assert.isBelow(
+    firstCommandDoneIndex,
+    continuationStartIndex,
+    "the subagent's work is stored while the root is idle, not when its end wakes the root",
+  );
 }
