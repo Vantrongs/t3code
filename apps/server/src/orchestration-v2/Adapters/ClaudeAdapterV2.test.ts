@@ -7415,6 +7415,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             event.subagent.status === "running" &&
             event.subagent.runId === "run-attempt-claude-wake-9c",
         );
+        assert.isAtLeast(reopenIndex, 0);
         const resumedWorkIndexes = harness.events.flatMap((event, index) =>
           event.type === "message.updated" && event.message.text === "RESUMED_WORK" ? [index] : [],
         );
