@@ -4158,6 +4158,23 @@ export function makeClaudeAdapterV2(
           ) {
             return;
           }
+          // A call the subagent left open never returns once it ends. It ends
+          // first, while the run that owns the child thread still takes its
+          // events.
+          if (existingSubagent !== undefined && input.status !== "running") {
+            const openCalls = [...subagentToolCalls.values()].filter(
+              (toolCall) => toolCall.threadId === existingSubagent.childThreadId,
+            );
+            yield* endToolCalls({
+              context: input.context,
+              toolCalls: openCalls,
+              status: input.status === "cancelled" ? "interrupted" : "failed",
+              completedAt: yield* DateTime.now,
+            });
+            for (const toolCall of openCalls) {
+              subagentToolCalls.delete(toolCall.nativeItemId);
+            }
+          }
           // A task_started under a tool call other than the current run's is
           // a resume: SendMessage re-emits task_started for the same task id
           // under its own tool_use_id, with the sent message as the prompt.
