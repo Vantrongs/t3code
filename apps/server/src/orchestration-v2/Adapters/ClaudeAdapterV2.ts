@@ -6340,7 +6340,10 @@ export function makeClaudeAdapterV2(
           }
 
           for (const { toolResult, output } of claudeToolResultEntriesFromMessage(message)) {
-            const subagent = context.subagentsByToolUseId.get(toolResult.tool_use_id);
+            // Session scope: while the root is idle, this context is the turn
+            // that settled last, which never saw a subagent an earlier turn
+            // launched (a nested one whose Agent call returns now).
+            const subagent = yield* resolveSubagentByToolUseId(context, toolResult.tool_use_id);
             // A resume task_started reuses the resuming tool call's
             // tool_use_id (e.g. SendMessage), whose tool_result only
             // acknowledges delivery. Only the Agent launch's tool_result may
