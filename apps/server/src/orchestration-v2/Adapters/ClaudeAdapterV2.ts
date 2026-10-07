@@ -5630,6 +5630,19 @@ export function makeClaudeAdapterV2(
           if (settled === undefined) {
             return null;
           }
+          // The result of a call already shown as its row only ends that row,
+          // so it never waits.
+          const userResults = claudeToolResultBlocksFromUserMessage(message);
+          if (
+            message.type === "user" &&
+            userResults.length > 0 &&
+            userResults.length === message.message.content.length &&
+            userResults.every(
+              (toolResult) => findToolCall(settled, toolResult.tool_use_id) !== undefined,
+            )
+          ) {
+            return settled;
+          }
           // A subagent's task_started still in the wake buffer registers or
           // re-opens it only when a continuation drains it, and only that run
           // stores the work that follows. So that subagent's own frames, and
@@ -5651,27 +5664,35 @@ export function makeClaudeAdapterV2(
                 ? undefined
                 : (yield* Ref.get(sessionSubagentTaskIdsByToolUseId)).get(parentToolUseId);
           const returnedToolUseIds = new Set(
-            [
-              ...claudeToolResultBlocksFromAssistantMessage(message),
-              ...claudeToolResultBlocksFromUserMessage(message),
-            ].map((toolResult) => toolResult.tool_use_id),
+            [...claudeToolResultBlocksFromAssistantMessage(message), ...userResults].map(
+              (toolResult) => toolResult.tool_use_id,
+            ),
           );
           if (
             bufferedStarts.some(
               (start) =>
                 start.task_id === taskId ||
-                // Without the launching call's id, any frame may be its result.
-                (start.tool_use_id === undefined
-                  ? returnedToolUseIds.size > 0
-                  : returnedToolUseIds.has(start.tool_use_id)),
+                (start.tool_use_id !== undefined &&
+                  (start.tool_use_id === parentToolUseId ||
+                    returnedToolUseIds.has(start.tool_use_id))),
             )
           ) {
             return null;
           }
-          const subagent =
-            taskId === undefined
-              ? undefined
-              : (yield* Ref.get(sessionSubagentsByTaskId)).get(taskId);
+          // A frame whose owner is named later, by progress, waits in the hold
+          // used during a turn, keyed by that owner, so its later frames queue
+          // behind it there and are released in order.
+          if (taskId === undefined) {
+            return parentToolUseId === null ? null : settled;
+          }
+          // Without the launching call's id, any result may be its launch.
+          if (
+            returnedToolUseIds.size > 0 &&
+            bufferedStarts.some((start) => start.tool_use_id === undefined)
+          ) {
+            return null;
+          }
+          const subagent = (yield* Ref.get(sessionSubagentsByTaskId)).get(taskId);
           return subagent?.task.status === "running" ? settled : null;
         });
 

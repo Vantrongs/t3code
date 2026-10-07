@@ -2086,6 +2086,9 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     readonly close?: (sdkMessages: Queue.Queue<SDKMessage>) => Effect.Effect<void>;
     readonly interrupt?: Effect.Effect<void>;
     readonly environment?: NodeJS.ProcessEnv;
+    // A CLI process opened after the first streams from its own queue, so the
+    // first one can exit (Queue.shutdown) and a later turn can start another.
+    readonly freshQueueOnReopen?: boolean;
   }) =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
@@ -2094,6 +2097,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         prefix: "t3-claude-v2-wake-",
       });
       const sdkMessages = yield* Queue.unbounded<SDKMessage>();
+      const processQueues: Array<Queue.Queue<SDKMessage>> = [];
       const processedMessages = new WeakMap<SDKMessage, Deferred.Deferred<void>>();
       const offerAndWait = Effect.fnUntraced(function* (message: SDKMessage) {
         const processed = yield* Deferred.make<void>();
@@ -2127,8 +2131,24 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         queryRunner: {
           allocateSessionId: Effect.succeed(WAKE_NATIVE_SESSION),
           open: (input) =>
-            Effect.sync(() => {
+            Effect.gen(function* () {
               openedOptions = input.options;
+              if (options?.freshQueueOnReopen === true && processQueues.length > 0) {
+                const processMessages = yield* Queue.unbounded<SDKMessage>();
+                processQueues.push(processMessages);
+                return {
+                  messages: Stream.fromQueue(processMessages),
+                  offer: (message: SDKUserMessage) =>
+                    Effect.sync(() => {
+                      offeredMessages.push(message);
+                    }),
+                  setModel: () => Effect.void,
+                  setPermissionMode: () => Effect.void,
+                  interrupt: Effect.void,
+                  close: Queue.shutdown(processMessages),
+                };
+              }
+              processQueues.push(sdkMessages);
               return {
                 messages: Stream.fromQueue(sdkMessages).pipe(
                   Stream.flatMap((message) =>
@@ -2206,6 +2226,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         providerThread,
         threadId,
         sdkMessages,
+        processQueues,
         offerAndWait,
         offeredMessages,
         permissionModeChanges,
@@ -6855,6 +6876,328 @@ describe("ClaudeAdapterV2 background wake turns", () => {
     ),
   );
 
+  it.effect.each(["before", "after"] as const)(
+    "keeps a subagent call's result when the CLI exits before the drain (result %s the nested launch's)",
+    (bashResultOrder) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const OUTER_TASK_ID = "task-exit-buffered-outer";
+          const OUTER_TOOL_USE_ID = "toolu-exit-buffered-outer";
+          const NESTED_TASK_ID = "task-exit-buffered-nested";
+          const NESTED_TOOL_USE_ID = "toolu-exit-buffered-nested";
+          const BASH = "toolu-exit-buffered-bash";
+          const harness = yield* makeWakeHarnessWithOptions({ freshQueueOnReopen: true });
+          const now = yield* DateTime.now;
+          const bashItems = () =>
+            harness.events.flatMap((event) =>
+              event.type === "turn_item.updated" && event.turnItem.nativeItemRef?.nativeId === BASH
+                ? [
+                    `${event.turnItem.type}:${event.turnItem.status}:${JSON.stringify("input" in event.turnItem ? event.turnItem.input : null)}`,
+                  ]
+                : [],
+            );
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-exit-buffered-1"),
+              text: "Audit in the background.",
+              attachments: [],
+            }),
+          );
+          for (const frame of [
+            makeSubagentTaskStartedFrame({
+              taskId: OUTER_TASK_ID,
+              toolUseId: OUTER_TOOL_USE_ID,
+              uuid: "00000000-0000-4000-8000-000000001001",
+            }),
+            makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000001002",
+              result: "Auditing in the background.",
+            }),
+          ]) {
+            yield* Queue.offer(harness.sdkMessages, frame);
+          }
+          yield* awaitUntil(() => harness.terminalEvents().length === 1, "launch turn terminal");
+
+          // While the root is idle, the subagent starts Bash; it is projected at once.
+          for (const frame of makeSubagentAssistantFrames({
+            parentToolUseId: OUTER_TOOL_USE_ID,
+            uuid: "00000000-0000-4000-8000-000000001003",
+            bashToolUseId: BASH,
+          })) {
+            yield* Queue.offer(harness.sdkMessages, frame);
+          }
+          yield* awaitUntil(() => bashItems().length === 1, "idle Bash call");
+
+          // A nested start buffers, and its launch result waits behind it. Bash's
+          // successful result arrives before or after that launch result.
+          const bashResultFrame = makeSubagentToolResultFrame({
+            parentToolUseId: OUTER_TOOL_USE_ID,
+            uuid: "00000000-0000-4000-8000-000000001006",
+            toolUseId: BASH,
+          });
+          for (const frame of [
+            claudeSdkFrame({
+              type: "assistant",
+              message: {
+                model: "claude-sonnet-4-6",
+                id: "msg_exit_buffered_nested_launch",
+                type: "message",
+                role: "assistant",
+                content: [
+                  {
+                    type: "tool_use",
+                    id: NESTED_TOOL_USE_ID,
+                    name: "Agent",
+                    input: { description: "Nested check", prompt: "Reply with NESTED_OK" },
+                  },
+                ],
+              },
+              parent_tool_use_id: OUTER_TOOL_USE_ID,
+              uuid: "00000000-0000-4000-8000-000000001004",
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+            claudeSdkFrame({
+              type: "system",
+              subtype: "task_started",
+              task_id: NESTED_TASK_ID,
+              tool_use_id: NESTED_TOOL_USE_ID,
+              description: "Nested check",
+              subagent_type: "general-purpose",
+              is_backgrounded: false,
+              spawn_depth: 2,
+              task_type: "local_agent",
+              prompt: "Reply with NESTED_OK",
+              uuid: "00000000-0000-4000-8000-000000001005",
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+            ...(bashResultOrder === "before" ? [bashResultFrame] : []),
+            ...makeSubagentAssistantFrames({
+              parentToolUseId: NESTED_TOOL_USE_ID,
+              uuid: "00000000-0000-4000-8000-000000001007",
+              text: "NESTED_OK",
+            }),
+            makeSubagentNotificationFrame({
+              taskId: NESTED_TASK_ID,
+              toolUseId: NESTED_TOOL_USE_ID,
+              summary: "NESTED_OK",
+              uuid: "00000000-0000-4000-8000-000000001008",
+            }),
+            makeSubagentToolResultFrame({
+              parentToolUseId: OUTER_TOOL_USE_ID,
+              uuid: "00000000-0000-4000-8000-000000001009",
+              toolUseId: NESTED_TOOL_USE_ID,
+            }),
+            ...(bashResultOrder === "after" ? [bashResultFrame] : []),
+            makeSubagentNotificationFrame({
+              taskId: OUTER_TASK_ID,
+              toolUseId: OUTER_TOOL_USE_ID,
+              summary: "OUTER_DONE",
+              uuid: "00000000-0000-4000-8000-000000001010",
+            }),
+          ]) {
+            yield* Queue.offer(harness.sdkMessages, frame);
+          }
+          yield* awaitUntil(
+            () => harness.continuationRequests.length === 1,
+            "continuation request",
+          );
+
+          // The CLI exits before the continuation run drains the wake buffer.
+          yield* Queue.shutdown(harness.sdkMessages);
+          let quietYields = 0;
+          yield* awaitUntil(() => quietYields++ >= 50, "query exit");
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-exit-buffered-2"),
+              text: "Background task completed.",
+              attachments: [],
+              providerTurnOrdinal: 2,
+              messageCreatedBy: "agent",
+              messageCreationSource: "provider",
+            }),
+          );
+          // The continuation opened a new CLI process: the first one's exit was handled.
+          assert.equal(harness.processQueues.length, 2);
+          yield* Queue.offer(
+            harness.processQueues[1]!,
+            makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000001011",
+              result: "The audit finished.",
+            }),
+          );
+          yield* awaitUntil(() => harness.terminalEvents().length === 2, "continuation terminal");
+
+          const input = JSON.stringify("git log -5");
+          assert.deepEqual(bashItems(), [
+            `command_execution:running:${input}`,
+            `command_execution:completed:${input}`,
+          ]);
+        }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+      ),
+  );
+
+  it.effect(
+    "ends a subagent's SendMessage with its result when the CLI exits while the resume waits",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const SENDER_TASK_ID = "task-exit-resume-sender";
+          const SENDER_TOOL_USE_ID = "toolu-exit-resume-sender";
+          const RESUMED_TASK_ID = "task-exit-resume-target";
+          const RESUMED_TOOL_USE_ID = "toolu-exit-resume-target";
+          const SEND = "toolu-exit-resume-sendmessage";
+          const SEND_INPUT = { to: RESUMED_TASK_ID, message: "Check the last commit again." };
+          const harness = yield* makeWakeHarnessWithOptions({ freshQueueOnReopen: true });
+          const now = yield* DateTime.now;
+          const sendItems = () =>
+            harness.events.flatMap((event) =>
+              event.type === "turn_item.updated" && event.turnItem.nativeItemRef?.nativeId === SEND
+                ? [
+                    `${event.turnItem.type}:${event.turnItem.status}:${JSON.stringify("input" in event.turnItem ? event.turnItem.input : null)}`,
+                  ]
+                : [],
+            );
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-exit-resume-1"),
+              text: "Run two auditors in the background.",
+              attachments: [],
+            }),
+          );
+          // The target subagent finishes inside the turn; the sender keeps running.
+          for (const frame of [
+            makeSubagentTaskStartedFrame({
+              taskId: SENDER_TASK_ID,
+              toolUseId: SENDER_TOOL_USE_ID,
+              uuid: "00000000-0000-4000-8000-000000001101",
+            }),
+            makeSubagentTaskStartedFrame({
+              taskId: RESUMED_TASK_ID,
+              toolUseId: RESUMED_TOOL_USE_ID,
+              uuid: "00000000-0000-4000-8000-000000001102",
+            }),
+            makeSubagentNotificationFrame({
+              taskId: RESUMED_TASK_ID,
+              toolUseId: RESUMED_TOOL_USE_ID,
+              summary: "First answer.",
+              uuid: "00000000-0000-4000-8000-000000001103",
+            }),
+            makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000001104",
+              result: "Auditing in the background.",
+            }),
+          ]) {
+            yield* Queue.offer(harness.sdkMessages, frame);
+          }
+          yield* awaitUntil(() => harness.terminalEvents().length === 1, "launch turn terminal");
+
+          // While the root is idle, the sender resumes the finished subagent.
+          // Its SendMessage call is projected at once.
+          yield* Queue.offer(
+            harness.sdkMessages,
+            claudeSdkFrame({
+              type: "assistant",
+              message: {
+                model: "claude-sonnet-4-6",
+                id: "msg_exit_resume_sendmessage",
+                type: "message",
+                role: "assistant",
+                content: [{ type: "tool_use", id: SEND, name: "SendMessage", input: SEND_INPUT }],
+              },
+              parent_tool_use_id: SENDER_TOOL_USE_ID,
+              uuid: "00000000-0000-4000-8000-000000001105",
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+          );
+          yield* awaitUntil(() => sendItems().length >= 1, "idle SendMessage call");
+
+          // The resume's task_started buffers. The SendMessage result names that
+          // start's tool use, but its call already shows as a row, so it ends it.
+          for (const frame of [
+            claudeSdkFrame({
+              type: "system",
+              subtype: "task_started",
+              task_id: RESUMED_TASK_ID,
+              tool_use_id: SEND,
+              description: "Audit recent commits",
+              is_backgrounded: true,
+              task_type: "local_agent",
+              prompt: SEND_INPUT.message,
+              uuid: "00000000-0000-4000-8000-000000001106",
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+            claudeSdkFrame({
+              type: "user",
+              message: {
+                role: "user",
+                content: [{ type: "tool_result", tool_use_id: SEND, content: "Message sent." }],
+              },
+              parent_tool_use_id: SENDER_TOOL_USE_ID,
+              uuid: "00000000-0000-4000-8000-000000001107",
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+            makeSubagentNotificationFrame({
+              taskId: RESUMED_TASK_ID,
+              toolUseId: SEND,
+              summary: "Second answer.",
+              uuid: "00000000-0000-4000-8000-000000001108",
+            }),
+          ]) {
+            yield* Queue.offer(harness.sdkMessages, frame);
+          }
+          yield* awaitUntil(
+            () => harness.continuationRequests.length === 1,
+            "continuation request",
+          );
+          const beforeExit = sendItems();
+
+          // The CLI exits before the continuation run drains the wake buffer.
+          yield* Queue.shutdown(harness.sdkMessages);
+          let quietYields = 0;
+          yield* awaitUntil(() => quietYields++ >= 50, "query exit");
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-exit-resume-2"),
+              text: "Background task completed.",
+              attachments: [],
+              providerTurnOrdinal: 2,
+              messageCreatedBy: "agent",
+              messageCreationSource: "provider",
+            }),
+          );
+          // The continuation opened a new CLI process: the first one's exit was handled.
+          assert.equal(harness.processQueues.length, 2);
+          yield* Queue.offer(
+            harness.processQueues[1]!,
+            makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000001109",
+              result: "The audit finished.",
+            }),
+          );
+          yield* awaitUntil(() => harness.terminalEvents().length === 2, "continuation terminal");
+
+          const input = JSON.stringify(SEND_INPUT);
+          assert.deepEqual(beforeExit, [`dynamic_tool:running:${input}`]);
+          assert.deepEqual(sendItems(), [
+            `dynamic_tool:running:${input}`,
+            `dynamic_tool:completed:${input}`,
+          ]);
+        }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+      ),
+  );
+
   it.effect("releases held frames before the notification that first names the tool use", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -6930,6 +7273,181 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         assert.deepEqual(routing.assistantTexts(harness.threadId), ["The auditor finished."]);
       }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
     ),
+  );
+
+  it.effect.each([
+    ["", "none"],
+    [" behind another subagent's start without one", "before"],
+    [" when another subagent's start without one arrives between its frames", "between"],
+  ] as const)(
+    "keeps a subagent's frames in order when a late progress names its tool use while the root is idle%s",
+    ([, otherStart]) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const TASK_ID = "task-late-owner-idle";
+          const TOOL_USE_ID = "toolu-late-owner-idle";
+          const BASH = "toolu-late-owner-idle-bash";
+          const harness = yield* makeWakeHarness;
+          const now = yield* DateTime.now;
+          const bashStatuses = () =>
+            harness.events.flatMap((event) =>
+              event.type === "turn_item.updated" && event.turnItem.nativeItemRef?.nativeId === BASH
+                ? [`${event.turnItem.type}:${event.turnItem.status}`]
+                : [],
+            );
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-late-owner-idle-1"),
+              text: "Audit in the background.",
+              attachments: [],
+            }),
+          );
+          // task_started without tool_use_id (optional in the SDK type), then
+          // the root settles.
+          for (const frame of [
+            claudeSdkFrame({
+              type: "system",
+              subtype: "task_started",
+              task_id: TASK_ID,
+              description: "Audit recent commits",
+              subagent_type: "general-purpose",
+              is_backgrounded: true,
+              task_type: "local_agent",
+              prompt: "Audit the last five commits.",
+              uuid: "00000000-0000-4000-8000-000000000a01",
+              session_id: WAKE_NATIVE_SESSION,
+            }),
+            makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000000a02",
+              result: "Auditing in the background.",
+            }),
+          ]) {
+            yield* Queue.offer(harness.sdkMessages, frame);
+          }
+          yield* awaitUntil(() => harness.terminalEvents().length === 1, "launch turn terminal");
+
+          // Another subagent starts while the root is idle, also without a
+          // tool_use_id, so its start waits in the wake buffer.
+          const otherStartFrame = claudeSdkFrame({
+            type: "system",
+            subtype: "task_started",
+            task_id: "task-late-owner-other",
+            description: "Check the changelog",
+            subagent_type: "general-purpose",
+            is_backgrounded: true,
+            task_type: "local_agent",
+            prompt: "Check the changelog.",
+            uuid: "00000000-0000-4000-8000-000000000a09",
+            session_id: WAKE_NATIVE_SESSION,
+          });
+          const progressFrame = claudeSdkFrame({
+            type: "system",
+            subtype: "task_progress",
+            task_id: TASK_ID,
+            tool_use_id: TOOL_USE_ID,
+            description: "Reading the last commits",
+            usage: { total_tokens: 1, tool_uses: 1, duration_ms: 1 },
+            uuid: "00000000-0000-4000-8000-000000000a04",
+            session_id: WAKE_NATIVE_SESSION,
+          });
+          const bashResultFrame = makeSubagentToolResultFrame({
+            parentToolUseId: TOOL_USE_ID,
+            uuid: "00000000-0000-4000-8000-000000000a05",
+            toolUseId: BASH,
+          });
+          // Root idle: the child's Bash call arrives before anything names the
+          // owner's tool use; progress names it before or after the call returns.
+          for (const frame of [
+            ...(otherStart === "before" ? [otherStartFrame] : []),
+            ...makeSubagentAssistantFrames({
+              parentToolUseId: TOOL_USE_ID,
+              uuid: "00000000-0000-4000-8000-000000000a03",
+              text: "First.",
+              bashToolUseId: BASH,
+            }),
+            ...(otherStart === "between"
+              ? [otherStartFrame, bashResultFrame, progressFrame]
+              : [progressFrame, bashResultFrame]),
+            ...makeSubagentAssistantFrames({
+              parentToolUseId: TOOL_USE_ID,
+              uuid: "00000000-0000-4000-8000-000000000a06",
+              text: "Second.",
+            }),
+            makeSubagentNotificationFrame({
+              taskId: TASK_ID,
+              toolUseId: TOOL_USE_ID,
+              summary: "Second.",
+              uuid: "00000000-0000-4000-8000-000000000a07",
+            }),
+          ]) {
+            yield* Queue.offer(harness.sdkMessages, frame);
+          }
+          yield* awaitUntil(
+            () => harness.continuationRequests.length === 1,
+            "continuation request",
+          );
+          yield* Queue.offer(
+            harness.sdkMessages,
+            makeResultFrame({
+              uuid: "00000000-0000-4000-8000-000000000a08",
+              result: "The auditor finished.",
+            }),
+          );
+          yield* harness.runtime.startTurn(
+            makeClaudeTestTurnInput({
+              threadId: harness.threadId,
+              providerThread: harness.providerThread,
+              now,
+              attemptId: RunAttemptId.make("attempt-claude-late-owner-idle-2"),
+              text: "Background task completed.",
+              attachments: [],
+              providerTurnOrdinal: 2,
+              messageCreatedBy: "agent",
+              messageCreationSource: "provider",
+            }),
+          );
+          yield* awaitUntil(() => harness.terminalEvents().length === 2, "continuation terminal");
+
+          const routing = subagentRouting(harness.events, [BASH]);
+          const childTexts = routing.assistantTexts(routing.childThreadId);
+          const statuses = bashStatuses();
+          // Observed order of child texts and Bash item updates, for diagnosis.
+          const trace = harness.events.flatMap((event) =>
+            event.type === "message.updated" &&
+            event.message.role === "assistant" &&
+            event.message.threadId === routing.childThreadId
+              ? [`text:${event.message.text}#${event.message.id}`]
+              : event.type === "turn_item.updated" &&
+                  event.turnItem.nativeItemRef?.nativeId === BASH
+                ? [`bash:${event.turnItem.status}`]
+                : [],
+          );
+          assert.deepEqual(childTexts, ["First.", "Second."], `trace: ${JSON.stringify(trace)}`);
+          assert.deepEqual(
+            [...(routing.toolThreadIds.get(BASH) ?? [])],
+            [routing.childThreadId],
+            `trace: ${JSON.stringify(trace)}`,
+          );
+          assert.deepEqual(
+            statuses,
+            ["command_execution:running", "command_execution:completed"],
+            `trace: ${JSON.stringify(trace)}`,
+          );
+          // Progress that waited behind the subagent's frames still reaches its
+          // card, and asks for no continuation of its own.
+          assert.isTrue(
+            harness.events.some(
+              (event) =>
+                event.type === "subagent.updated" &&
+                event.subagent.progress === "Reading the last commits",
+            ),
+          );
+          assert.lengthOf(harness.continuationRequests, 1);
+        }).pipe(Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer))),
+      ),
   );
 
   it.effect("does not resolve a newer API retry when replaying a held subagent frame", () =>
