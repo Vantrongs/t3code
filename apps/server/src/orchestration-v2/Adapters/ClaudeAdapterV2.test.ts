@@ -6347,14 +6347,15 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         );
         const routing = subagentRouting(harness.events, [STRADDLING_BASH, IDLE_BASH]);
         assert.deepEqual(routing.assistantTexts(routing.childThreadId), ["Still auditing."]);
+        // The call that spans the turn end keeps the type and input its
+        // tool_use gave it during the open turn.
         const straddling = latestToolItem(STRADDLING_BASH);
+        const straddlingItem =
+          straddling?.type === "turn_item.updated" ? straddling.turnItem : undefined;
+        assert.equal(straddlingItem?.status, "completed");
         assert.equal(
-          straddling?.type === "turn_item.updated" ? straddling.turnItem.type : undefined,
-          "command_execution",
-        );
-        assert.equal(
-          straddling?.type === "turn_item.updated" ? straddling.turnItem.status : undefined,
-          "completed",
+          straddlingItem?.type === "command_execution" ? straddlingItem.input : undefined,
+          "git log -5",
         );
         assert.equal(harness.continuationRequests.length, 0);
 
