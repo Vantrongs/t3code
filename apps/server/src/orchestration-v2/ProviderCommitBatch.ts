@@ -83,6 +83,23 @@ const CurrentWorker = Context.Reference<number | undefined>(
   },
 );
 
+const CurrentFollowUps = Context.Reference<
+  Array<Effect.Effect<void, CommitBatchError>> | undefined
+>("t3/ProviderCommitBatch/CurrentFollowUps", {
+  defaultValue: () => undefined,
+});
+
+/**
+ * Runs `effect` now, or, inside a snapshot on the shared worker, on its consumer once its commit
+ * succeeds, for work that must not hold the worker, such as waiting for a thread lock.
+ */
+export const afterCommit = <A, E>(effect: Effect.Effect<A, E>) =>
+  Effect.flatMap(CurrentFollowUps, (followUps) => {
+    if (followUps === undefined) return Effect.asSome(effect);
+    followUps.push(effect.pipe(Effect.mapError((cause) => new CommitBatchError({ cause }))));
+    return Effect.succeedNone;
+  });
+
 export const make = Effect.fn("ProviderCommitBatch.make")(function* (
   commit: (work: Effect.Effect<void, CommitBatchError>) => Effect.Effect<void, CommitBatchError>,
   enabled: boolean,
@@ -237,8 +254,6 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
     after: Effect.Effect<boolean, E2, R2>,
     // Runs on the shared worker right after a snapshot, before this consumer's next queued job.
     afterSnapshot: Effect.Effect<boolean, E2, R2> = Effect.succeed(false),
-    // Checked before a snapshot is queued; false processes it alone on this consumer instead.
-    canShare: (event: A) => Effect.Effect<boolean, never, R2> = () => Effect.succeed(true),
   ) {
     if (!enabled)
       return yield* source.pipe(
@@ -260,9 +275,8 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
           const processed = yield* Deferred.make<void>();
           const event = signal._tag === "Event" ? signal.event : undefined;
           // EOF only acknowledges prior work; it can share a commit with other consumers.
-          const snapshot =
-            signal._tag === "End" ||
-            (event !== undefined && isSnapshot(event) && (yield* canShare(event)));
+          const snapshot = signal._tag === "End" || (event !== undefined && isSnapshot(event));
+          const followUps: Array<Effect.Effect<void, CommitBatchError>> = [];
           const bytes =
             snapshot && event !== undefined ? Buffer.byteLength(yield* encodeQueue(event)) : 0;
           const work: Effect.Effect<boolean, E | E2, R2> =
@@ -272,6 +286,7 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
                 ? Effect.succeed(true)
                 : snapshot
                   ? process(event).pipe(
+                      Effect.provideService(CurrentFollowUps, followUps),
                       Effect.andThen(afterSnapshot),
                       // Later jobs of this consumer in the same batch must not run.
                       Effect.tap((stop) =>
@@ -285,12 +300,13 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
             ? yield* enqueue(work, token, true, bytes)
             : (yield* enqueue(Effect.void, token, false, 0)).pipe(Effect.andThen(work));
           if (!snapshot) resume = Deferred.await(processed);
-          return { reply, processed, check: !snapshot };
+          return { reply, processed, check: !snapshot, followUps };
         }),
       ),
       Stream.buffer({ capacity: MAX_EVENTS }),
-      Stream.mapEffect(({ reply, processed, check }) =>
+      Stream.mapEffect(({ reply, processed, check, followUps }) =>
         reply.pipe(
+          Effect.tap(() => Effect.forEach(followUps, (followUp) => followUp, { discard: true })),
           Effect.flatMap((end) =>
             end ? Effect.succeed(true) : check ? after : Effect.succeed(false),
           ),

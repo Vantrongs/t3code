@@ -33,9 +33,11 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Queue from "effect/Queue";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlError from "effect/sql/SqlError";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 
 import { toolOutputImages } from "@t3tools/shared/toolOutput";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -2285,9 +2287,7 @@ layer("ProviderEventIngestorV2", (it) => {
         },
       } satisfies ProviderEventIngestor.ProviderEventIngestInput["event"];
 
-      assert.isTrue(yield* ingestor.needsThreadLock(subagentUpdated));
       const first = yield* ingest(subagentUpdated);
-      assert.isFalse(yield* ingestor.needsThreadLock(subagentUpdated));
       const repeated = yield* ingest(subagentUpdated);
       const childThread = yield* projectionStore.getThread(childThreadId);
 
@@ -2312,19 +2312,10 @@ layer("ProviderEventIngestorV2", (it) => {
         model: "gpt-6.1-sol",
         options: [{ id: "reasoningEffort", value: "low" }],
       };
-      const reportedUpdate = {
+      const reported = yield* ingest({
         ...subagentUpdated,
         subagent: { ...subagentUpdated.subagent, modelSelection: reportedSelection },
-      };
-      assert.isTrue(yield* ingestor.needsThreadLock(reportedUpdate));
-      // A shared provider commit cannot wait for the lock, so the next update outside one syncs.
-      const shared = yield* eventSink.withProviderBatch(ingest(reportedUpdate));
-      assert.deepEqual(
-        shared.map((stored) => stored.event.type),
-        ["subagent.updated"],
-      );
-      assert.isTrue(yield* ingestor.needsThreadLock(reportedUpdate));
-      const reported = yield* ingest(reportedUpdate);
+      });
       assert.deepEqual(
         reported.map((stored) => stored.event.type),
         ["subagent.updated", "thread.model-selection-updated"],
@@ -2355,6 +2346,198 @@ layer("ProviderEventIngestorV2", (it) => {
     ),
   );
 });
+
+// On a file, lock-free reads see committed state on reader workers while a write holds the writer.
+const layerOnFile = (filename: string) => {
+  const stores = Layer.merge(EventStore.layer, ProjectionStore.layer).pipe(
+    Layer.provideMerge(
+      SqlitePersistence.layerFromPath(filename).pipe(Layer.provide(NodeServices.layer)),
+    ),
+  );
+  const shared = Layer.mergeAll(
+    layerEmptyInstances,
+    stores,
+    EventSink.layer.pipe(Layer.provide(stores)),
+    IdAllocator.layer,
+    ThreadCommandExecutor.layer,
+    layerGit,
+  );
+  return Layer.mergeAll(shared, ProviderEventIngestor.layer.pipe(Layer.provide(shared)));
+};
+
+it.effect(
+  "restores a native subagent's model that a command changed while its update was queued",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "ingestor-queued-model-" });
+      yield* Effect.gen(function* () {
+        const now = yield* DateTime.now;
+        const eventSink = yield* EventSink.EventSinkV2;
+        const eventStore = yield* EventStore.EventStoreV2;
+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const threadCommands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
+        const rootEvent = yield* threadCreatedEvent(now);
+        if (rootEvent.type !== "thread.created") {
+          throw new Error("Expected a thread.created fixture event");
+        }
+        const childThreadId = idAllocator.derive.threadFromProviderThread({
+          driver: CODEX_DRIVER,
+          nativeThreadId: "native-queued-model-subagent",
+        });
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId: rootEvent.threadId,
+        });
+        const ingest = (event: ProviderEventIngestor.ProviderEventIngestInput["event"]) =>
+          ingestor.ingestNormalized({
+            providerSessionId,
+            providerInstanceId: modelSelection.instanceId,
+            threadId: rootEvent.threadId,
+            event,
+          });
+        yield* eventSink.write({ events: [rootEvent] });
+        yield* ingest({
+          type: "app_thread.created",
+          driver: CODEX_DRIVER,
+          appThread: {
+            ...rootEvent.payload,
+            id: childThreadId,
+            title: "review design",
+            activeProviderThreadId: null,
+            lineage: {
+              parentThreadId: rootEvent.threadId,
+              relationshipToParent: "subagent",
+              rootThreadId: rootEvent.threadId,
+            },
+          },
+        });
+        const highWater = yield* eventSink.latestSequence();
+
+        const writerHeld = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const pulled = yield* Queue.unbounded<string>();
+        const input = yield* Queue.unbounded<
+          ProviderEventIngestor.ProviderEventIngestInput["event"],
+          Cause.Done
+        >();
+        const holder: ProviderEventIngestor.ProviderEventIngestInput["event"] = {
+          type: "message.updated",
+          driver: CODEX_DRIVER,
+          message: {
+            id: MessageId.make("message:writer-holder"),
+            threadId: rootEvent.threadId,
+            runId: null,
+            nodeId: null,
+            createdBy: "agent",
+            creationSource: "provider",
+            role: "assistant",
+            text: "holds the shared commit",
+            attachments: [],
+            streaming: true,
+            createdAt: now,
+            updatedAt: now,
+          },
+        };
+        const consumer = yield* eventSink
+          .consumeProviderEvents(
+            Stream.fromQueue(input).pipe(Stream.tap((event) => Queue.offer(pulled, event.type))),
+            (event) =>
+              event === holder
+                ? Deferred.succeed(writerHeld, undefined).pipe(
+                    Effect.andThen(Deferred.await(release)),
+                  )
+                : ingest(event).pipe(Effect.asVoid),
+            Effect.succeed(false),
+            Effect.succeed(false),
+          )
+          .pipe(Effect.forkScoped({ startImmediately: true }));
+        yield* Queue.offer(input, holder);
+        yield* Deferred.await(writerHeld);
+
+        // As thread.model-selection.set does: lock the thread, read it, queue the full row.
+        const userSelection = { instanceId: modelSelection.instanceId, model: "gpt-5.5" };
+        const commandRead = yield* Deferred.make<void>();
+        const command = yield* threadCommands
+          .withLock(
+            childThreadId,
+            Effect.gen(function* () {
+              const thread = yield* projectionStore.getThread(childThreadId);
+              yield* Deferred.succeed(commandRead, undefined);
+              yield* eventSink.write({
+                events: [
+                  {
+                    id: yield* idAllocator.allocate.event({ threadId: childThreadId }),
+                    type: "thread.model-selection-updated",
+                    threadId: childThreadId,
+                    occurredAt: now,
+                    payload: { ...thread, modelSelection: userSelection, updatedAt: now },
+                  },
+                ],
+              });
+            }),
+          )
+          .pipe(Effect.forkScoped({ startImmediately: true }));
+        yield* Deferred.await(commandRead);
+        yield* TestClock.adjust(0);
+
+        // The provider still reports the model the thread had before the queued command.
+        yield* Queue.offer(input, {
+          type: "subagent.updated",
+          driver: CODEX_DRIVER,
+          subagent: {
+            id: NodeId.make("node:queued-model-subagent"),
+            threadId: rootEvent.threadId,
+            runId: null,
+            parentNodeId: NodeId.make("node:root"),
+            origin: "provider_native",
+            createdBy: "agent",
+            driver: CODEX_DRIVER,
+            providerInstanceId: modelSelection.instanceId,
+            providerThreadId: null,
+            childThreadId,
+            nativeTaskRef: null,
+            prompt: "Review the design",
+            title: "review design",
+            model: modelSelection.model,
+            modelSelection,
+            status: "completed",
+            result: null,
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+          },
+        });
+        assert.deepEqual(yield* Queue.takeN(pulled, 2), ["message.updated", "subagent.updated"]);
+        yield* TestClock.adjust(0);
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(command);
+        yield* Queue.end(input);
+        yield* Fiber.join(consumer);
+
+        // The same events in the same order as when the update committed alone before its sync.
+        const stored = yield* eventStore.read({ afterSequence: highWater }).pipe(Stream.runCollect);
+        assert.deepEqual(
+          stored.map(({ event }) => [
+            event.type,
+            event.threadId,
+            event.type === "thread.model-selection-updated" ? event.payload.modelSelection : null,
+          ]),
+          [
+            ["thread.model-selection-updated", childThreadId, userSelection],
+            ["subagent.updated", rootEvent.threadId, null],
+            ["thread.model-selection-updated", childThreadId, modelSelection],
+          ],
+        );
+        assert.deepEqual(
+          (yield* projectionStore.getThread(childThreadId)).modelSelection,
+          modelSelection,
+        );
+      }).pipe(Effect.provide(layerOnFile(`${directory}/statev2.sqlite`)));
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
 
 const ingestCompletedProviderTurn = (
   guard: Pick<

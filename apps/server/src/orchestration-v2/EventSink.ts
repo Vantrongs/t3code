@@ -86,16 +86,11 @@ export interface EventSinkV2Shape {
     after: Effect.Effect<boolean, E2, R2>,
     /** Checked on the shared commit worker after each snapshot, so it must not wait. */
     afterSnapshot: Effect.Effect<boolean, E2, R2>,
-    /** False keeps a snapshot out of the shared commit, as for work that takes a thread lock. */
-    canShare: (event: A) => Effect.Effect<boolean, never, R2>,
   ) => Effect.Effect<
     void,
     E | E2 | ProviderCommitBatch.CommitBatchError | Schema.SchemaError,
     R | R2
   >;
-
-  /** Whether this fiber writes inside a shared provider commit, which must not wait for a lock. */
-  readonly inProviderBatch: Effect.Effect<boolean>;
 
   /** Normalize and persist an ordered group against one transaction; publish after its commit. */
   readonly withProviderBatch: <A, E, R>(
@@ -1025,7 +1020,6 @@ const layerBase: Layer.Layer<
 
     return EventSinkV2.of({
       consumeProviderEvents: coordinator.consume,
-      inProviderBatch: Effect.map(CurrentProviderBatch, (batch) => batch !== undefined),
       withProviderBatch,
       write: (input) =>
         writeEffect({ ...input, effects: [] }).pipe(

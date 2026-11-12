@@ -1694,12 +1694,6 @@ export const layer: Layer.Layer<
                   }),
             stopsIngestion,
             stopsIngestion,
-            (event) =>
-              event.type === "idle_flush"
-                ? Effect.succeed(false)
-                : providerEventIngestor
-                    .needsThreadLock(event)
-                    .pipe(Effect.map((needsLock) => !needsLock)),
           )
           .pipe(
             Effect.ensuring(closeIdleFlush),

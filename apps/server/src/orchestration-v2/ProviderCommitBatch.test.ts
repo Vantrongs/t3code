@@ -306,21 +306,45 @@ it.effect("keeps a transaction failure when rolling back one failed snapshot", (
       (work) => work.pipe(Effect.mapError(() => transactionError)),
       true,
     );
+    let followedUp = false;
     const exit = yield* coordinator
       .consume(
         Stream.concat(Stream.make(event(1)), Stream.never),
-        () => Effect.fail("invalid snapshot"),
+        () =>
+          ProviderCommitBatch.afterCommit(
+            Effect.sync(() => {
+              followedUp = true;
+            }),
+          ).pipe(Effect.andThen(Effect.fail("invalid snapshot"))),
         Effect.succeed(false),
       )
       .pipe(Effect.exit);
     assert.isTrue(Exit.isFailure(exit));
     if (Exit.isFailure(exit)) assert.strictEqual(Cause.squash(exit.cause), transactionError);
+    assert.isFalse(followedUp);
   }).pipe(Effect.scoped),
 );
 
-it.effect(
-  "allows a command holding the thread lock to commit while a provider control waits for it",
-  () =>
+it.effect("fails ingestion when a snapshot's follow-up fails after its commit", () =>
+  Effect.gen(function* () {
+    const coordinator = yield* ProviderCommitBatch.make((work) => work, true);
+    const exit = yield* coordinator
+      .consume(
+        Stream.concat(Stream.make(event(1)), Stream.never),
+        () => ProviderCommitBatch.afterCommit(Effect.fail("sync failed")),
+        Effect.succeed(false),
+      )
+      .pipe(Effect.exit);
+    assert.deepEqual(
+      exit,
+      Exit.fail(new ProviderCommitBatch.CommitBatchError({ cause: "sync failed" })),
+    );
+  }).pipe(Effect.scoped),
+);
+
+it.effect.each([control, event(1)])(
+  "allows a command holding the thread lock to commit while a provider $type waits for it",
+  (raw) =>
     Effect.gen(function* () {
       const coordinator = yield* ProviderCommitBatch.make((work) => work, true);
       const locks = yield* KeyedLock.make<ThreadId>();
@@ -340,10 +364,13 @@ it.effect(
       yield* Deferred.await(held);
       const consumer = yield* coordinator
         .consume(
-          Stream.make(control),
+          Stream.make(raw),
           () =>
             Deferred.succeed(waiting, undefined).pipe(
-              Effect.andThen(locks.withLock(threadId, Effect.void)),
+              // A snapshot runs on the shared worker, so its lock waits until after its commit.
+              Effect.andThen(
+                ProviderCommitBatch.afterCommit(locks.withLock(threadId, Effect.void)),
+              ),
             ),
           Effect.succeed(true),
         )
@@ -510,55 +537,58 @@ it.effect("settles calls made after the coordinator's scope closes", () =>
   }),
 );
 
-it.effect.each([true, false])(
-  "commits a subagent record with the item queued after it unless the consumer keeps it apart (%s)",
-  (shares) =>
-    Effect.gen(function* () {
-      const started = yield* Deferred.make<void>();
-      const release = yield* Deferred.make<void>();
-      const output: Array<ReadonlyArray<string>> = [];
-      let current: Array<string> | undefined;
-      const coordinator = yield* ProviderCommitBatch.make(
-        (work) =>
-          Effect.gen(function* () {
-            current = [];
-            if (output.length === 0) {
-              yield* Deferred.succeed(started, undefined);
-              yield* Deferred.await(release);
-            }
-            yield* work;
-            output.push(current);
-            current = undefined;
-          }),
-        true,
+it.effect("commits a subagent record with the item queued after it, then its follow-up", () =>
+  Effect.gen(function* () {
+    const started = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    const output: Array<ReadonlyArray<string>> = [];
+    let current: Array<string> | undefined;
+    const coordinator = yield* ProviderCommitBatch.make(
+      (work) =>
+        Effect.gen(function* () {
+          current = [];
+          if (output.length === 0) {
+            yield* Deferred.succeed(started, undefined);
+            yield* Deferred.await(release);
+          }
+          yield* work;
+          output.push(current);
+          current = undefined;
+        }),
+      true,
+    );
+    const record = (type: string) =>
+      Effect.sync(() => {
+        if (current === undefined) output.push([type]);
+        else current.push(type);
+      });
+    const process = (raw: { readonly type: string }) =>
+      record(raw.type).pipe(
+        Effect.andThen(
+          raw.type === "subagent.updated"
+            ? ProviderCommitBatch.afterCommit(record("follow-up"))
+            : Effect.void,
+        ),
       );
-      const process = (raw: { readonly type: string }) =>
-        Effect.sync(() => {
-          if (current === undefined) output.push([raw.type]);
-          else current.push(raw.type);
-        });
-      const leading = yield* coordinator
-        .consume(Stream.make({ type: "message.updated" }), process, Effect.succeed(false))
-        .pipe(Effect.forkScoped({ startImmediately: true }));
-      yield* Deferred.await(started);
-      const consumer = yield* coordinator
-        .consume(
-          Stream.make({ type: "subagent.updated" }, { type: "turn_item.updated" }),
-          process,
-          Effect.succeed(false),
-          Effect.succeed(false),
-          (raw) => Effect.succeed(shares || raw.type !== "subagent.updated"),
-        )
-        .pipe(Effect.forkScoped({ startImmediately: true }));
-      yield* TestClock.adjust(0);
-      yield* Deferred.succeed(release, undefined);
-      yield* Fiber.join(leading);
-      yield* Fiber.join(consumer);
-      assert.deepEqual(
-        output,
-        shares
-          ? [["message.updated"], ["subagent.updated", "turn_item.updated"]]
-          : [["message.updated"], ["subagent.updated"], ["turn_item.updated"]],
-      );
-    }).pipe(Effect.scoped),
+    const leading = yield* coordinator
+      .consume(Stream.make({ type: "message.updated" }), process, Effect.succeed(false))
+      .pipe(Effect.forkScoped({ startImmediately: true }));
+    yield* Deferred.await(started);
+    const consumer = yield* coordinator
+      .consume(
+        Stream.make({ type: "subagent.updated" }, { type: "turn_item.updated" }),
+        process,
+        Effect.succeed(false),
+      )
+      .pipe(Effect.forkScoped({ startImmediately: true }));
+    yield* TestClock.adjust(0);
+    yield* Deferred.succeed(release, undefined);
+    yield* Fiber.join(leading);
+    yield* Fiber.join(consumer);
+    assert.deepEqual(output, [
+      ["message.updated"],
+      ["subagent.updated", "turn_item.updated"],
+      ["follow-up"],
+    ]);
+  }).pipe(Effect.scoped),
 );

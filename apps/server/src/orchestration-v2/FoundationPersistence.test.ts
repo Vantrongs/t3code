@@ -503,7 +503,6 @@ it.effect.each(
                 : Effect.void,
             Effect.succeed(false),
             Effect.succeed(false),
-            () => Effect.succeed(true),
           )
           .pipe(Effect.exit, Effect.forkScoped({ startImmediately: true })),
       );
