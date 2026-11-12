@@ -261,6 +261,85 @@ describe("applyOrchestrationV2ProjectionEvent", () => {
     expect(next?.visibleTurnItems[1]).toBe(secondRow);
   });
 
+  it("carries a subagent's progress line onto its item, as the server stores it", () => {
+    const later = DateTime.makeUnsafe("2026-06-20T00:00:07.000Z");
+    const subagentId = NodeId.make("node-progress");
+    const subagent = {
+      id: subagentId,
+      threadId,
+      runId,
+      parentNodeId: NodeId.make("node-root"),
+      origin: "provider_native",
+      createdBy: "agent",
+      driver: "claudeAgent",
+      providerInstanceId: ProviderInstanceId.make("claude"),
+      providerThreadId: null,
+      childThreadId: null,
+      nativeTaskRef: null,
+      prompt: "Map the repository",
+      title: null,
+      model: null,
+      status: "running",
+      progress: "Reading src",
+      result: null,
+      startedAt: now,
+      completedAt: null,
+      updatedAt: now,
+    } as OrchestrationV2ThreadProjection["subagents"][number];
+    const item = {
+      ...commandItem("item-subagent"),
+      nodeId: subagentId,
+      status: "running",
+      completedAt: null,
+      type: "subagent",
+      subagentId,
+      origin: "provider_native",
+      driver: "claudeAgent",
+      providerInstanceId: ProviderInstanceId.make("claude"),
+      childThreadId: null,
+      prompt: "Map the repository",
+      progress: "Reading src",
+      result: null,
+    } as OrchestrationV2TurnItem;
+    const projection = {
+      ...emptyProjection,
+      runs: [run],
+      subagents: [subagent],
+      turnItems: [item],
+      visibleTurnItems: [
+        {
+          position: 0,
+          visibility: "local" as const,
+          sourceThreadId: threadId,
+          sourceItemId: item.id,
+          item,
+        },
+      ],
+    };
+    const line = (payload: typeof subagent) =>
+      ({
+        id: "event-subagent-line",
+        type: "subagent.updated",
+        threadId,
+        runId,
+        occurredAt: later,
+        payload,
+      }) as OrchestrationV2DomainEvent;
+
+    const next = applyOrchestrationV2ProjectionEvent(
+      projection,
+      line({ ...subagent, progress: "Reading tests", updatedAt: later }),
+    );
+    const followed = { ...item, progress: "Reading tests", updatedAt: later };
+    expect(next?.turnItems).toEqual([followed]);
+    expect(next?.visibleTurnItems.map((row) => row.item)).toEqual([followed]);
+    const repeated = applyOrchestrationV2ProjectionEvent(
+      next,
+      line({ ...subagent, progress: "Reading tests", status: "completed", updatedAt: later }),
+    );
+    expect(repeated?.turnItems).toBe(next?.turnItems);
+  });
+
   it("inserts live turn items by authoritative ordinal", () => {
     const queuedFuture = commandItem("item-queued-future", "queued", 300);
     const activeAssistant = commandItem("item-active-assistant", "done", 201);

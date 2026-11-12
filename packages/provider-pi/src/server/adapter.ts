@@ -1364,6 +1364,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               providerInstanceId: options.instanceId,
               childThreadId: null,
               prompt: task,
+              ...progress,
               result: resultText,
             },
           });

@@ -574,21 +574,14 @@ export const layer: Layer.Layer<
               ];
             case "turn_item.updated": {
               const item = input.event.turnItem;
-              // Adapters resend a subagent's item with each progress line of its record. The
-              // sink keeps the stored ordinal, so a resend that changes nothing else is dropped.
+              // Adapters resend a subagent's item with each progress line of its record, which the
+              // projector already copied onto the stored item. The sink keeps the stored ordinal.
               if (item.type === "subagent") {
                 const stored = yield* projections.getTurnItem({
                   threadId: item.threadId,
                   itemId: item.id,
                 });
-                if (
-                  stored !== null &&
-                  sameTurnItem(stored, {
-                    ...item,
-                    ordinal: stored.ordinal,
-                    updatedAt: stored.updatedAt,
-                  })
-                )
+                if (stored !== null && sameTurnItem(stored, { ...item, ordinal: stored.ordinal }))
                   return [];
               }
               return [

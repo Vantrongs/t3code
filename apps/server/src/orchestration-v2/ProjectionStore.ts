@@ -67,6 +67,7 @@ import {
   OrchestrationV2SubagentJson as OrchestrationV2SubagentJsonSchema,
   OrchestrationV2TurnItemJson as OrchestrationV2TurnItemJsonSchema,
   orchestrationV2RunWorkStartedAt,
+  withSubagentProgress,
   RunId,
   MessageId,
   RuntimeRequestId,
@@ -933,17 +934,19 @@ export function applyToProjection(
         ...base,
         nodes: upsertById(base.nodes, event.payload),
       };
-    case "subagent.updated":
-      return {
-        ...base,
-        subagents: upsertById(
-          base.subagents,
-          preserveCompletionDelivery(
-            base.subagents.find((task) => task.id === event.payload.id),
-            event.payload,
-          ),
+    case "subagent.updated": {
+      const subagents = upsertById(
+        base.subagents,
+        preserveCompletionDelivery(
+          base.subagents.find((task) => task.id === event.payload.id),
+          event.payload,
         ),
-      };
+      );
+      const turnItems = base.turnItems.map((item) => withSubagentProgress(item, event.payload));
+      return turnItems.every((item, index) => item === base.turnItems[index])
+        ? { ...base, subagents }
+        : withLocalVisibleTurnItems({ ...base, subagents, turnItems });
+    }
     case "provider-session.attached":
     case "provider-session.updated":
       return {
@@ -2484,6 +2487,27 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   )
                   ELSE excluded.payload_json
                 END
+            `;
+              const progress = event.payload.progress ?? null;
+              const updatedAt = stringField(payload, "updatedAt");
+              // withSubagentProgress on the stored item.
+              yield* sql`
+              UPDATE orchestration_v2_projection_turn_items
+              SET
+                payload_json = json_set(
+                  CASE
+                    WHEN ${progress} IS NULL THEN json_remove(payload_json, '$.progress')
+                    ELSE json_set(payload_json, '$.progress', ${progress})
+                  END,
+                  '$.updatedAt',
+                  ${updatedAt}
+                ),
+                updated_at = ${updatedAt}
+              WHERE node_id = ${event.payload.id}
+                AND thread_id = ${event.payload.threadId}
+                AND type = 'subagent'
+                AND json_extract(payload_json, '$.subagentId') = ${event.payload.id}
+                AND json_extract(payload_json, '$.progress') IS NOT ${progress}
             `;
               break;
             }

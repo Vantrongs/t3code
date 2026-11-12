@@ -1862,7 +1862,8 @@ export const OrchestrationV2TurnItem = Schema.Union([
     childThreadId: Schema.NullOr(ThreadId),
     remoteChild: Schema.optional(OrchestrationV2RemoteTaskChild),
     prompt: Schema.String,
-    // Progress lives only on subagent `subagentId`, so a progress line does not rewrite this item.
+    /** Follows subagent `subagentId`: see `withSubagentProgress`. */
+    progress: Schema.optional(Schema.String),
     result: Schema.NullOr(Schema.String),
     /** Same as the prompt and result of subagent `subagentId`. */
     promptOmitted: DedupedBodyMarker,
@@ -1880,6 +1881,30 @@ export const OrchestrationV2TurnItem = Schema.Union([
   }),
 ]);
 export type OrchestrationV2TurnItem = typeof OrchestrationV2TurnItem.Type;
+
+/**
+ * Projections copy a subagent's progress line onto its item, so the ingestor need not store the
+ * item an adapter resends with each line. The server's SQL projector applies the same rule.
+ */
+export function withSubagentProgress(
+  item: OrchestrationV2TurnItem,
+  subagent: OrchestrationV2Subagent,
+): OrchestrationV2TurnItem {
+  if (
+    item.type !== "subagent" ||
+    item.subagentId !== subagent.id ||
+    item.nodeId !== subagent.id ||
+    item.progress === subagent.progress
+  ) {
+    return item;
+  }
+  const { progress: _progress, ...rest } = item;
+  return {
+    ...rest,
+    ...(subagent.progress === undefined ? {} : { progress: subagent.progress }),
+    updatedAt: subagent.updatedAt,
+  };
+}
 
 const isUnknownTurnItem = hasUnknownUnionTag(OrchestrationV2TurnItem.members, "type");
 
@@ -2705,6 +2730,7 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     childThreadId: Schema.NullOr(ThreadId),
     remoteChild: Schema.optional(OrchestrationV2RemoteTaskChild),
     prompt: Schema.String,
+    progress: Schema.optional(Schema.String),
     result: Schema.NullOr(Schema.String),
   }),
   Schema.Struct({

@@ -15,6 +15,7 @@ import {
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2Run,
+  type OrchestrationV2Subagent,
   type OrchestrationV2TurnItem,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -569,7 +570,7 @@ layer("ProviderEventIngestorV2", (it) => {
     }),
   );
 
-  it.effect("skips a subagent item that differs from the stored one only in its update time", () =>
+  it.effect("stores a subagent's progress lines once, on its record and its item", () =>
     Effect.gen(function* () {
       const now = yield* DateTime.now;
       const later = DateTime.add(now, { seconds: 7 });
@@ -585,6 +586,28 @@ layer("ProviderEventIngestorV2", (it) => {
         threadId,
       });
       const subagentId = NodeId.make(`${threadId}:subagent`);
+      const record: OrchestrationV2Subagent = {
+        id: subagentId,
+        threadId,
+        runId: null,
+        parentNodeId: NodeId.make("node:root"),
+        origin: "provider_native",
+        createdBy: "agent",
+        driver: CODEX_DRIVER,
+        providerInstanceId: modelSelection.instanceId,
+        providerThreadId: null,
+        childThreadId: null,
+        nativeTaskRef: null,
+        prompt: "Map the repository",
+        title: "Explore",
+        model: null,
+        status: "running",
+        progress: "Reading src",
+        result: null,
+        startedAt: now,
+        completedAt: null,
+        updatedAt: now,
+      };
       const item: Extract<OrchestrationV2TurnItem, { readonly type: "subagent" }> = {
         id: TurnItemId.make(`${threadId}:subagent-item`),
         threadId,
@@ -607,28 +630,47 @@ layer("ProviderEventIngestorV2", (it) => {
         providerInstanceId: modelSelection.instanceId,
         childThreadId: null,
         prompt: "Map the repository",
+        progress: "Reading src",
         result: null,
       };
-      const ingestItem = (sent: OrchestrationV2TurnItem) =>
+      const ingest = (event: ProviderEventIngestor.ProviderEventIngestInput["event"]) =>
         ingestor.ingestNormalized({
           providerSessionId,
           providerInstanceId: modelSelection.instanceId,
           threadId,
-          event: { type: "turn_item.updated", driver: CODEX_DRIVER, turnItem: sent },
+          event,
         });
+      const ingestLine = (sentRecord: OrchestrationV2Subagent, sentItem: OrchestrationV2TurnItem) =>
+        Effect.all([
+          ingest({ type: "subagent.updated", driver: CODEX_DRIVER, subagent: sentRecord }),
+          ingest({ type: "turn_item.updated", driver: CODEX_DRIVER, turnItem: sentItem }),
+        ]);
+      const storedItem = () =>
+        projectionStore
+          .getThreadProjection(threadId)
+          .pipe(Effect.map((projection) => projection.turnItems.find(({ id }) => id === item.id)));
 
-      assert.lengthOf(yield* ingestItem(item), 1);
-      // Adapters resend the item with each progress line of the subagent record.
-      assert.isEmpty(yield* ingestItem({ ...item, ordinal: 2, updatedAt: later }));
-      const completed = {
-        ...item,
-        status: "completed" as const,
-        completedAt: later,
-        updatedAt: later,
-      };
-      assert.lengthOf(yield* ingestItem(completed), 1);
-      const projection = yield* projectionStore.getThreadProjection(threadId);
-      assert.equal(projection.turnItems.find((entry) => entry.id === item.id)?.status, "completed");
+      const [firstRecord, firstItem] = yield* ingestLine(record, item);
+      assert.lengthOf(firstRecord, 1);
+      assert.lengthOf(firstItem, 1);
+      // Adapters resend the item with each progress line of the record.
+      const [lineRecord, lineItem] = yield* ingestLine(
+        { ...record, progress: "Reading tests", updatedAt: later },
+        { ...item, ordinal: 2, progress: "Reading tests", updatedAt: later },
+      );
+      assert.lengthOf(lineRecord, 1);
+      assert.isEmpty(lineItem);
+      const afterLine = yield* storedItem();
+      assert.equal(afterLine?.type === "subagent" ? afterLine.progress : null, "Reading tests");
+      assert.deepEqual(afterLine?.updatedAt, later);
+      assert.equal(afterLine?.ordinal, 1);
+
+      const [, completedItem] = yield* ingestLine(
+        { ...record, status: "completed", result: "Done", completedAt: later, updatedAt: later },
+        { ...item, status: "completed", result: "Done", completedAt: later, updatedAt: later },
+      );
+      assert.lengthOf(completedItem, 1);
+      assert.equal((yield* storedItem())?.status, "completed");
     }),
   );
 

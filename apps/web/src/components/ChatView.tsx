@@ -390,7 +390,6 @@ import type { CodexArtifactTemplate } from "@t3tools/shared/codexArtifactTemplat
 const EMPTY_FEEDBACK_SUBMISSIONS: ReadonlyArray<CodexFeedbackSubmission> = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
 const EMPTY_TURN_ITEMS: ThreadStructure["turnItems"] = [];
-const EMPTY_SUBAGENTS: ThreadStructure["subagents"] = [];
 const EMPTY_RUNS: ThreadStructure["runs"] = [];
 const EMPTY_AUTO_UPDATE_ENVIRONMENTS: ReadonlyArray<EnvironmentPresentation> = [];
 const EMPTY_COMPOSER_BANNER_ITEMS: ReadonlyArray<ComposerBannerStackItem> = [];
@@ -2436,7 +2435,6 @@ export default function ChatView(props: ChatViewProps) {
     runIsLive: (isWorking && activeRuntime?.status !== "waiting") || phase === "connecting",
     pendingBackgroundTasks,
     turnItems: serverProjection?.turnItems ?? EMPTY_TURN_ITEMS,
-    subagents: serverProjection?.subagents ?? EMPTY_SUBAGENTS,
     activePendingApproval,
     activePendingUserInput,
     localCheckoutBranchMismatch,

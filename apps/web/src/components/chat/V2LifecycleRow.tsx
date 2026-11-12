@@ -156,6 +156,7 @@ export function V2LifecycleRow(props: {
         driver={item.driver}
         title={formatSubagentDisplayTitle(item.title ?? "Subagent")}
         result={item.result}
+        progress={item.progress}
         startedAt={item.startedAt}
         completedAt={item.completedAt}
         threadId={item.childThreadId}
@@ -401,7 +402,7 @@ function SubagentTimelineLink(props: {
   readonly driver: ProviderDriverKind;
   readonly title: string;
   readonly result: string | null;
-  readonly progress?: string | undefined;
+  readonly progress: string | undefined;
   readonly status: OrchestrationV2TurnItem["status"];
   readonly startedAt: DateTime.Utc | null;
   readonly completedAt: DateTime.Utc | null;

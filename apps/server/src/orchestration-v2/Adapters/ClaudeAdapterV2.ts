@@ -7661,6 +7661,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               providerInstanceId: task.providerInstanceId,
               childThreadId: task.childThreadId,
               prompt: task.prompt,
+              ...(task.progress === undefined ? {} : { progress: task.progress }),
               result: task.result,
             },
           });

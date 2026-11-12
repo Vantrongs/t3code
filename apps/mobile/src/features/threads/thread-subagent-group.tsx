@@ -126,7 +126,7 @@ export function ThreadSubagentGroup(props: {
       startedAt: live?.startedAt ?? item.startedAt,
       completedAt: live?.completedAt ?? item.completedAt,
       result: live?.result ?? item.result,
-      progress: live?.progress,
+      progress: live?.progress ?? item.progress,
       model: live?.model ?? null,
       modelSelection: live?.modelSelection,
     };
