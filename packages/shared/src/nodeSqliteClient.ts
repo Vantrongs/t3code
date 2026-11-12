@@ -484,7 +484,7 @@ const makeReader = Effect.fnUntraced(function* (
   });
 });
 
-const CHECKPOINT_FRAMES = 1000;
+export const CHECKPOINT_FRAMES = 1000;
 const CHECKPOINT_IDLE_MS = 100;
 const CHECKPOINT_BACKPRESSURE_FRAMES = 32_768;
 

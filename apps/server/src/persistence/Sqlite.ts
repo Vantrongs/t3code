@@ -70,7 +70,8 @@ const makeLayerSetup = <E, R>(migrate: Effect.Effect<unknown, E, R>) =>
     }).pipe(Effect.withSpan("Sqlite.setup")),
   );
 
-const layerSetup = makeLayerSetup(runMigrations());
+/** The server's connection setup and migrations, for clients that open the database with other options. */
+export const layerSetup = makeLayerSetup(runMigrations());
 
 const makeLayerFromPath = <E, R>(setup: Layer.Layer<never, E, R>) =>
   Effect.fn("makeSqlitePersistenceLive")(function* (dbPath: string) {
