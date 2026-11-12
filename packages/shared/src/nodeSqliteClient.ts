@@ -484,7 +484,10 @@ const makeReader = Effect.fnUntraced(function* (
   });
 });
 
-const CHECKPOINT_FRAMES = 1000;
+// A checkpoint copies each page changed since the last one once, and most commits rewrite the same
+// hot pages, so a longer interval copies them less often. Under synchronous = NORMAL it also
+// widens what an OS crash or power loss can roll back (see Sqlite.ts).
+const CHECKPOINT_FRAMES = 4000;
 const CHECKPOINT_IDLE_MS = 100;
 const CHECKPOINT_BACKPRESSURE_FRAMES = 32_768;
 
