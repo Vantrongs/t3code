@@ -288,6 +288,7 @@ const makeWalReader = (walPath: string) => {
 
 interface CommitRecord {
   readonly eventTypes: ReadonlyArray<string>;
+  readonly atMs: number;
   readonly ms: number;
   readonly frames: ReadonlyArray<Frame>;
 }
@@ -456,6 +457,7 @@ const replayMain = async () => {
       if (written.length > 1) throw new Error("one write produced several commits");
       commits.push({
         eventTypes: group.map((recorded) => recorded.event.type),
+        atMs: group[0]!.event.occurredAt.epochMilliseconds,
         ms,
         frames: written[0] ?? [],
       });
@@ -557,6 +559,42 @@ const summarize = (input: {
       pendingFrames = 0;
     }
   }
+  // What one transaction per window of commits would write: the union of their pages, starting a
+  // window at a commit whose first event is more than windowMs after the window's first. Each
+  // window also runs the checkpoint simulation at several thresholds; 0 ms is the live grouping.
+  const groupCommit = [0, 1, 5, 20, 100, 1000].flatMap((windowMs) => {
+    const groups: Array<Set<number>> = [];
+    let start = Number.NEGATIVE_INFINITY;
+    for (const commit of written) {
+      if (windowMs === 0 || commit.atMs - start > windowMs) {
+        groups.push(new Set());
+        start = commit.atMs;
+      }
+      for (const { page } of commit.frames) groups.at(-1)!.add(page);
+    }
+    const frames = groups.reduce((sum, g) => sum + g.size, 0);
+    return [NodeSqliteClient.CHECKPOINT_FRAMES, 4000, 16000].map((ckFrames) => {
+      let pending = new Set<number>();
+      let pendingFrames = 0;
+      let ckPages = 0;
+      for (const g of groups) {
+        for (const page of g) pending.add(page);
+        pendingFrames += g.size;
+        if (pendingFrames >= ckFrames) {
+          ckPages += pending.size;
+          pending = new Set();
+          pendingFrames = 0;
+        }
+      }
+      return {
+        windowMs,
+        ckFrames,
+        commits: groups.length,
+        framesPerEvent: frames / input.events,
+        checkpointPagesPerEvent: (ckPages + pending.size) / input.events,
+      };
+    });
+  });
   const byEventType = new Map<string, { commits: number; frames: number }>();
   for (const commit of written) {
     const key = commit.eventTypes.length === 1 ? commit.eventTypes[0]! : "(command group)";
@@ -593,6 +631,7 @@ const summarize = (input: {
       pagesPerEvent: (checkpointPages + pending.size) / input.events,
       uncheckpointedTailPages: pending.size,
     },
+    groupCommit,
     ownerChangedFrames: ownerChanged,
     byOwner: Object.fromEntries([...byOwner].sort((a, b) => b[1] - a[1])),
     byKind: Object.fromEntries([...byKind].sort((a, b) => b[1] - a[1])),
@@ -715,6 +754,11 @@ const printReport = (report: {
   console.log(
     `frames whose page changed owner during the replay: ${r.ownerChangedFrames} (${pct(r.ownerChangedFrames)})`,
   );
+  console.log("\ngrouped commits (window, checkpoint frames: commits, WAL frames + checkpoint pages per event):");
+  for (const g of r.groupCommit)
+    console.log(
+      `  ${String(g.windowMs).padStart(5)} ms  ${String(g.ckFrames).padStart(6)}: ${String(g.commits).padStart(6)} commits, ${g.framesPerEvent.toFixed(2)} + ${g.checkpointPagesPerEvent.toFixed(2)} = ${(g.framesPerEvent + g.checkpointPagesPerEvent).toFixed(2)}`,
+    );
   console.log("\nframes by b-tree (owner at the end of the run):");
   for (const [name, n] of Object.entries(r.byOwner))
     console.log(`  ${String(n).padStart(8)}  ${pct(n).padStart(6)}  ${name}`);
