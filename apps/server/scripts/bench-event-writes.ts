@@ -517,6 +517,7 @@ const replayMain = async () => {
 const percentile = (sorted: ReadonlyArray<number>, p: number) =>
   sorted.length === 0 ? 0 : sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))]!;
 
+const CK = NodeSqliteClient.CHECKPOINT_FRAMES;
 const summarize = (input: {
   readonly commits: ReadonlyArray<CommitRecord>;
   readonly sequenceMismatches: number;
@@ -552,7 +553,7 @@ const summarize = (input: {
     }
     pendingFrames += commit.frames.length;
     // The checkpoint worker backfills once a commit leaves this many frames unchecked.
-    if (pendingFrames >= NodeSqliteClient.CHECKPOINT_FRAMES) {
+    if (pendingFrames >= CK) {
       checkpoints++;
       checkpointPages += pending.size;
       pending = new Set();
@@ -573,7 +574,7 @@ const summarize = (input: {
       for (const { page } of commit.frames) groups.at(-1)!.add(page);
     }
     const frames = groups.reduce((sum, g) => sum + g.size, 0);
-    return [NodeSqliteClient.CHECKPOINT_FRAMES, 4000, 16000].map((ckFrames) => {
+    return [CK, 4000, 16000].map((ckFrames) => {
       let pending = new Set<number>();
       let pendingFrames = 0;
       let ckPages = 0;
@@ -588,6 +589,56 @@ const summarize = (input: {
       }
       return {
         windowMs,
+        ckFrames,
+        commits: groups.length,
+        framesPerEvent: frames / input.events,
+        checkpointPagesPerEvent: (ckPages + pending.size) / input.events,
+      };
+    });
+  });
+  // ProviderCommitBatch's rule with a linger: commits made only of provider snapshot events join
+  // the open batch while it is younger than lingerMs and under its 64-event cap; any other
+  // commit flushes the batch and commits alone. 0 ms is the recorded grouping.
+  const snapshotTypes = new Set([
+    "node.updated",
+    "message.updated",
+    "turn-item.updated",
+    "plan.updated",
+  ]);
+  const linger = [0, 5, 10, 20, 50].flatMap((lingerMs) => {
+    const groups: Array<Set<number>> = [];
+    let open: { start: number; events: number } | undefined;
+    for (const commit of written) {
+      const snapshot = commit.eventTypes.every((type) => snapshotTypes.has(type));
+      const joins =
+        snapshot &&
+        open !== undefined &&
+        lingerMs > 0 &&
+        commit.atMs - open.start <= lingerMs &&
+        open.events + commit.eventTypes.length <= 64;
+      if (joins) open!.events += commit.eventTypes.length;
+      else {
+        groups.push(new Set());
+        open = snapshot ? { start: commit.atMs, events: commit.eventTypes.length } : undefined;
+      }
+      for (const { page } of commit.frames) groups.at(-1)!.add(page);
+    }
+    const frames = groups.reduce((sum, g) => sum + g.size, 0);
+    return [CK, 4000].map((ckFrames) => {
+      let pending = new Set<number>();
+      let pendingFrames = 0;
+      let ckPages = 0;
+      for (const g of groups) {
+        for (const page of g) pending.add(page);
+        pendingFrames += g.size;
+        if (pendingFrames >= ckFrames) {
+          ckPages += pending.size;
+          pending = new Set();
+          pendingFrames = 0;
+        }
+      }
+      return {
+        lingerMs,
         ckFrames,
         commits: groups.length,
         framesPerEvent: frames / input.events,
@@ -632,6 +683,7 @@ const summarize = (input: {
       uncheckpointedTailPages: pending.size,
     },
     groupCommit,
+    linger,
     ownerChangedFrames: ownerChanged,
     byOwner: Object.fromEntries([...byOwner].sort((a, b) => b[1] - a[1])),
     byKind: Object.fromEntries([...byKind].sort((a, b) => b[1] - a[1])),
@@ -754,7 +806,9 @@ const printReport = (report: {
   console.log(
     `frames whose page changed owner during the replay: ${r.ownerChangedFrames} (${pct(r.ownerChangedFrames)})`,
   );
-  console.log("\ngrouped commits (window, checkpoint frames: commits, WAL frames + checkpoint pages per event):");
+  console.log(
+    "\ngrouped commits (window, checkpoint frames: commits, WAL frames + checkpoint pages per event):",
+  );
   for (const g of r.groupCommit)
     console.log(
       `  ${String(g.windowMs).padStart(5)} ms  ${String(g.ckFrames).padStart(6)}: ${String(g.commits).padStart(6)} commits, ${g.framesPerEvent.toFixed(2)} + ${g.checkpointPagesPerEvent.toFixed(2)} = ${(g.framesPerEvent + g.checkpointPagesPerEvent).toFixed(2)}`,
