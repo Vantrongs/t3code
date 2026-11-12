@@ -592,3 +592,85 @@ it.effect("commits a subagent record with the item queued after it, then its fol
     ]);
   }).pipe(Effect.scoped),
 );
+
+it.effect("runs a committed snapshot's follow-ups after its consumer is interrupted", () =>
+  Effect.gen(function* () {
+    let hold: { registered: Deferred.Deferred<void>; release: Deferred.Deferred<void> } | undefined;
+    const coordinator = yield* ProviderCommitBatch.make(
+      (work) =>
+        work.pipe(
+          Effect.andThen(
+            hold === undefined
+              ? Effect.void
+              : Deferred.succeed(hold.registered, undefined).pipe(
+                  Effect.andThen(Deferred.await(hold.release)),
+                ),
+          ),
+        ),
+      true,
+    );
+    const interruptDuringCommit = Effect.fnUntraced(function* (
+      followUp: Effect.Effect<void, string>,
+    ) {
+      hold = { registered: yield* Deferred.make<void>(), release: yield* Deferred.make<void>() };
+      const consumer = yield* coordinator
+        .consume(
+          Stream.concat(Stream.make(event(1)), Stream.never),
+          () => ProviderCommitBatch.afterCommit(followUp),
+          Effect.succeed(false),
+        )
+        .pipe(Effect.forkScoped({ startImmediately: true }));
+      yield* Deferred.await(hold.registered);
+      yield* Fiber.interrupt(consumer);
+      yield* Deferred.succeed(hold.release, undefined);
+      hold = undefined;
+      yield* coordinator.barrier(Effect.void);
+      yield* TestClock.adjust(0);
+    });
+    const ran: Array<string> = [];
+    // A failed orphaned follow-up is reported and does not stop the next one.
+    yield* interruptDuringCommit(
+      Effect.sync(() => ran.push("failed")).pipe(Effect.andThen(Effect.fail("sync failed"))),
+    );
+    yield* interruptDuringCommit(Effect.sync(() => ran.push("synced")));
+    assert.deepEqual(ran, ["failed", "synced"]);
+  }).pipe(Effect.scoped),
+);
+
+it.effect("runs again a follow-up whose consumer is interrupted while running it", () =>
+  Effect.gen(function* () {
+    const coordinator = yield* ProviderCommitBatch.make((work) => work, true);
+    const started = yield* Deferred.make<void>();
+    const locks = yield* KeyedLock.make<ThreadId>();
+    const threadId = ThreadId.make("locked-thread");
+    const release = yield* Deferred.make<void>();
+    const runs: Array<string> = [];
+    const command = yield* locks
+      .withLock(threadId, Deferred.await(release))
+      .pipe(Effect.forkScoped({ startImmediately: true }));
+    const consumer = yield* coordinator
+      .consume(
+        Stream.concat(Stream.make(event(1)), Stream.never),
+        () =>
+          ProviderCommitBatch.afterCommit(
+            Effect.sync(() => runs.push("started")).pipe(
+              Effect.andThen(Deferred.succeed(started, undefined)),
+              Effect.andThen(
+                locks.withLock(
+                  threadId,
+                  Effect.sync(() => runs.push("synced")),
+                ),
+              ),
+            ),
+          ),
+        Effect.succeed(false),
+      )
+      .pipe(Effect.forkScoped({ startImmediately: true }));
+    yield* Deferred.await(started);
+    yield* Fiber.interrupt(consumer);
+    yield* Deferred.succeed(release, undefined);
+    yield* Fiber.join(command);
+    yield* TestClock.adjust(0);
+    assert.deepEqual(runs, ["started", "started", "synced"]);
+  }).pipe(Effect.scoped),
+);

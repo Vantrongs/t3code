@@ -30,8 +30,21 @@ export class CommitBatchError extends Schema.TaggedError<CommitBatchError>()("Co
 }) {}
 export const isCommitBatchError = Schema.is(CommitBatchError);
 
+interface FollowUps {
+  readonly effects: Array<Effect.Effect<void, CommitBatchError>>;
+  // Follow-ups that ended other than by interruption; an interrupted one runs again from its start.
+  next: number;
+}
+interface Owner {
+  active: boolean;
+  ended: boolean;
+  // Follow-ups of this owner's committed snapshots that have not finished yet.
+  readonly owed: Set<FollowUps>;
+}
+const owner = (): Owner => ({ active: true, ended: false, owed: new Set() });
+
 interface Job {
-  readonly owner: { active: boolean };
+  readonly owner: Owner;
   readonly queuedAt: number;
   readonly snapshot: boolean;
   readonly bytes: number;
@@ -90,8 +103,10 @@ const CurrentFollowUps = Context.Reference<
 });
 
 /**
- * Runs `effect` now, or, inside a snapshot on the shared worker, on its consumer once its commit
- * succeeds, for work that must not hold the worker, such as waiting for a thread lock.
+ * Runs `effect` now, or, inside a snapshot on the shared worker, after its commit succeeds, for work
+ * that must not hold the worker, such as waiting for a thread lock. The snapshot's consumer runs it
+ * before its next job; if the consumer ends first, the coordinator runs it, and only closing the
+ * coordinator drops it. An interrupted run starts again from the beginning, so it must be idempotent.
  */
 export const afterCommit = <A, E>(effect: Effect.Effect<A, E>) =>
   Effect.flatMap(CurrentFollowUps, (followUps) => {
@@ -108,6 +123,8 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
   ) => Effect.Effect<void, CommitBatchError> = (work) => work,
 ) {
   const queue = yield* Queue.bounded<Job>(MAX_EVENTS);
+  // Follow-ups of committed snapshots whose consumer ended before running them.
+  const orphans = yield* Queue.unbounded<FollowUps>();
   const pending = new Set<Job>();
   let closed = false;
   const shutdown = Effect.gen(function* () {
@@ -119,9 +136,10 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
   // These helpers run once per raw event; the shared transaction owns the tracing span.
   const enqueue = Effect.fnUntraced(function* <A, E, R>(
     effect: Effect.Effect<A, E, R>,
-    token: { active: boolean },
+    token: Owner,
     snapshot: boolean,
     bytes: number,
+    followUps?: FollowUps,
   ) {
     const caller = yield* Effect.context<R>();
     const reply = yield* Deferred.make<A, E | CommitBatchError>();
@@ -158,7 +176,13 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
             reply,
             preserveFailure && ownFailure !== undefined ? ownFailure : exit.cause,
           );
-        } else yield* Deferred.succeed(reply, result);
+        } else {
+          if (followUps !== undefined && followUps.effects.length > 0) {
+            if (token.ended) Queue.offerUnsafe(orphans, followUps);
+            else token.owed.add(followUps);
+          }
+          yield* Deferred.succeed(reply, result);
+        }
       }),
       cancel: Effect.gen(function* () {
         pending.delete(job);
@@ -231,12 +255,24 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
       Effect.ensuring(shutdown),
       Effect.forkScoped,
     );
+    // Off the shared worker, in commit order, so a follow-up may wait for a thread lock.
+    yield* Effect.gen(function* () {
+      const followUps = yield* Queue.take(orphans);
+      while (followUps.next < followUps.effects.length) {
+        const exit = yield* Effect.exit(followUps.effects[followUps.next++]!);
+        // No consumer is left to fail, so report it as a failed ingestion would be.
+        if (Exit.isFailure(exit) && !Cause.hasInterruptsOnly(exit.cause))
+          yield* Effect.logWarning("provider commit follow-up failed after its consumer ended", {
+            cause: exit.cause,
+          });
+      }
+    }).pipe(Effect.forever, Effect.forkScoped);
   }
   const barrier = Effect.fnUntraced(function* <A, E, R>(effect: Effect.Effect<A, E, R>) {
     if (closed) return yield* Effect.interrupt;
     if (!enabled || pending.size === 0 || (yield* CurrentWorker) === (yield* Effect.fiberId))
       return yield* effect;
-    const token = { active: true };
+    const token = owner();
     return yield* enqueue(Effect.exit(effect), token, false, 0).pipe(
       Effect.flatten,
       Effect.orDie,
@@ -261,7 +297,7 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
         Stream.takeUntil(Boolean),
         Stream.runDrain,
       );
-    const token = { active: true };
+    const token = owner();
     const signals = source.pipe(
       Stream.map((event) => ({ _tag: "Event" as const, event })),
       Stream.catchCause((cause) => Stream.succeed({ _tag: "Failure" as const, cause })),
@@ -276,7 +312,7 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
           const event = signal._tag === "Event" ? signal.event : undefined;
           // EOF only acknowledges prior work; it can share a commit with other consumers.
           const snapshot = signal._tag === "End" || (event !== undefined && isSnapshot(event));
-          const followUps: Array<Effect.Effect<void, CommitBatchError>> = [];
+          const followUps: FollowUps = { effects: [], next: 0 };
           const bytes =
             snapshot && event !== undefined ? Buffer.byteLength(yield* encodeQueue(event)) : 0;
           const work: Effect.Effect<boolean, E | E2, R2> =
@@ -286,7 +322,7 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
                 ? Effect.succeed(true)
                 : snapshot
                   ? process(event).pipe(
-                      Effect.provideService(CurrentFollowUps, followUps),
+                      Effect.provideService(CurrentFollowUps, followUps.effects),
                       Effect.andThen(afterSnapshot),
                       // Later jobs of this consumer in the same batch must not run.
                       Effect.tap((stop) =>
@@ -297,7 +333,7 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
                     )
                   : process(event).pipe(Effect.as(false));
           const reply = snapshot
-            ? yield* enqueue(work, token, true, bytes)
+            ? yield* enqueue(work, token, true, bytes, followUps)
             : (yield* enqueue(Effect.void, token, false, 0)).pipe(Effect.andThen(work));
           if (!snapshot) resume = Deferred.await(processed);
           return { reply, processed, check: !snapshot, followUps };
@@ -306,7 +342,21 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
       Stream.buffer({ capacity: MAX_EVENTS }),
       Stream.mapEffect(({ reply, processed, check, followUps }) =>
         reply.pipe(
-          Effect.tap(() => Effect.forEach(followUps, (followUp) => followUp, { discard: true })),
+          Effect.tap(() =>
+            Effect.gen(function* () {
+              while (followUps.next < followUps.effects.length) {
+                const exit = yield* Effect.exit(followUps.effects[followUps.next]!);
+                if (Exit.isSuccess(exit) || !Cause.hasInterrupts(exit.cause)) followUps.next++;
+                if (Exit.isFailure(exit)) return yield* Effect.failCause(exit.cause);
+              }
+            }).pipe(
+              Effect.ensuring(
+                Effect.sync(() => {
+                  if (followUps.next === followUps.effects.length) token.owed.delete(followUps);
+                }),
+              ),
+            ),
+          ),
           Effect.flatMap((end) =>
             end ? Effect.succeed(true) : check ? after : Effect.succeed(false),
           ),
@@ -323,6 +373,9 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
       Effect.ensuring(
         Effect.sync(() => {
           token.active = false;
+          token.ended = true;
+          for (const followUps of token.owed) Queue.offerUnsafe(orphans, followUps);
+          token.owed.clear();
         }),
       ),
     );

@@ -808,7 +808,7 @@ export const layer: Layer.Layer<
               Effect.flatMap((storedEvents) =>
                 storedEvents.length === 0 || input.event.type !== "subagent.updated"
                   ? Effect.succeed(storedEvents)
-                  : // A shared commit cannot wait for the thread lock; its consumer syncs after it.
+                  : // A shared commit cannot wait for the thread lock; the sync runs after it.
                     ProviderCommitBatch.afterCommit(
                       syncSubagentThreadModel(input, input.event.subagent).pipe(
                         Effect.mapError(
