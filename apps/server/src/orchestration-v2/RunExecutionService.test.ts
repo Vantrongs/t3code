@@ -3998,6 +3998,7 @@ function runBackgroundItemScenario(
     ) => Effect.Effect<void>;
     // Consumes through the real commit coordinator, as the event sink does.
     readonly batched?: boolean;
+    readonly needsThreadLock?: boolean;
     readonly keepEventStreamOpen?: boolean;
     readonly hasPendingBackgroundWorkForThread?: (
       providerThread: OrchestrationV2ProviderThread,
@@ -4068,6 +4069,7 @@ function runBackgroundItemScenario(
           IdAllocator.layer,
           ThreadCommandExecutor.layer,
           Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
+            needsThreadLock: () => Effect.succeed(options?.needsThreadLock ?? false),
             ingestNormalized: (input) => {
               const write = Effect.gen(function* () {
                 const event = input.event;
@@ -4185,6 +4187,28 @@ function runBackgroundItemScenario(
     return yield* Ref.get(observed);
   });
 }
+
+it.effect.each([false, true])(
+  "shares a commit with a subagent update unless its ingestion takes a thread lock (%s)",
+  (needsThreadLock) =>
+    Effect.gen(function* () {
+      const commits: Array<string> = [];
+      yield* runBackgroundItemScenario(
+        `subagent-commit-${needsThreadLock}`,
+        (ids) => [subagentEvent(ids, "running"), rootTerminalEvent(ids, "completed")],
+        {
+          batched: true,
+          needsThreadLock,
+          onIngest: (event, write) =>
+            Effect.sync(() => {
+              if (event.type === "subagent.updated")
+                commits.push(write.inSharedCommit ? "shared" : "alone");
+            }),
+        },
+      );
+      assert.deepEqual(commits, [needsThreadLock ? "alone" : "shared"]);
+    }),
+);
 
 it.effect("keeps a failed root's still-running native children live while the run settles", () =>
   Effect.gen(function* () {

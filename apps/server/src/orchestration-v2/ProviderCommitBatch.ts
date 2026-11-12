@@ -20,6 +20,7 @@ export const enabled = Config.Boolean("T3CODE_PROVIDER_COMMIT_BATCHING").pipe(
 
 const isSnapshot = (event: { readonly type: string }) =>
   event.type === "node.updated" ||
+  event.type === "subagent.updated" ||
   event.type === "message.updated" ||
   event.type === "turn_item.updated" ||
   event.type === "plan.updated";
@@ -236,6 +237,8 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
     after: Effect.Effect<boolean, E2, R2>,
     // Runs on the shared worker right after a snapshot, before this consumer's next queued job.
     afterSnapshot: Effect.Effect<boolean, E2, R2> = Effect.succeed(false),
+    // Checked before a snapshot is queued; false processes it alone on this consumer instead.
+    canShare: (event: A) => Effect.Effect<boolean, never, R2> = () => Effect.succeed(true),
   ) {
     if (!enabled)
       return yield* source.pipe(
@@ -257,7 +260,9 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
           const processed = yield* Deferred.make<void>();
           const event = signal._tag === "Event" ? signal.event : undefined;
           // EOF only acknowledges prior work; it can share a commit with other consumers.
-          const snapshot = signal._tag === "End" || (event !== undefined && isSnapshot(event));
+          const snapshot =
+            signal._tag === "End" ||
+            (event !== undefined && isSnapshot(event) && (yield* canShare(event)));
           const bytes =
             snapshot && event !== undefined ? Buffer.byteLength(yield* encodeQueue(event)) : 0;
           const work: Effect.Effect<boolean, E | E2, R2> =

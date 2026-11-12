@@ -509,3 +509,56 @@ it.effect("settles calls made after the coordinator's scope closes", () =>
     assert.isTrue(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause));
   }),
 );
+
+it.effect.each([true, false])(
+  "commits a subagent record with the item queued after it unless the consumer keeps it apart (%s)",
+  (shares) =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const output: Array<ReadonlyArray<string>> = [];
+      let current: Array<string> | undefined;
+      const coordinator = yield* ProviderCommitBatch.make(
+        (work) =>
+          Effect.gen(function* () {
+            current = [];
+            if (output.length === 0) {
+              yield* Deferred.succeed(started, undefined);
+              yield* Deferred.await(release);
+            }
+            yield* work;
+            output.push(current);
+            current = undefined;
+          }),
+        true,
+      );
+      const process = (raw: { readonly type: string }) =>
+        Effect.sync(() => {
+          if (current === undefined) output.push([raw.type]);
+          else current.push(raw.type);
+        });
+      const leading = yield* coordinator
+        .consume(Stream.make({ type: "message.updated" }), process, Effect.succeed(false))
+        .pipe(Effect.forkScoped({ startImmediately: true }));
+      yield* Deferred.await(started);
+      const consumer = yield* coordinator
+        .consume(
+          Stream.make({ type: "subagent.updated" }, { type: "turn_item.updated" }),
+          process,
+          Effect.succeed(false),
+          Effect.succeed(false),
+          (raw) => Effect.succeed(shares || raw.type !== "subagent.updated"),
+        )
+        .pipe(Effect.forkScoped({ startImmediately: true }));
+      yield* TestClock.adjust(0);
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(leading);
+      yield* Fiber.join(consumer);
+      assert.deepEqual(
+        output,
+        shares
+          ? [["message.updated"], ["subagent.updated", "turn_item.updated"]]
+          : [["message.updated"], ["subagent.updated"], ["turn_item.updated"]],
+      );
+    }).pipe(Effect.scoped),
+);

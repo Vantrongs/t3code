@@ -222,6 +222,10 @@ export interface ProviderEventIngestorV2Shape {
       };
     },
   ) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, ProviderEventIngestorV2Error>;
+  /** Whether ingesting this event takes a thread lock, so it cannot share a provider commit. */
+  readonly needsThreadLock: (
+    event: ProviderAdapter.ProviderAdapterV2Event,
+  ) => Effect.Effect<boolean>;
 }
 
 export class ProviderEventIngestorV2 extends Context.Service<
@@ -338,33 +342,40 @@ export const layer: Layer.Layer<
       },
     );
 
+    const reportedSelection = (subagent: OrchestrationV2Subagent, modelSelection: ModelSelection) =>
+      subagent.modelSelection ??
+      (subagent.model === null || subagent.model === modelSelection.model
+        ? modelSelection
+        : { instanceId: modelSelection.instanceId, model: subagent.model });
+    const staleSubagentThread = (subagent: OrchestrationV2Subagent) =>
+      subagent.origin !== "provider_native" ||
+      subagent.childThreadId === null ||
+      (subagent.model === null && subagent.modelSelection === undefined)
+        ? Effect.succeed(null)
+        : projections.getThread(subagent.childThreadId).pipe(
+            Effect.map((thread) =>
+              modelSelectionsEqual(
+                thread.modelSelection,
+                reportedSelection(subagent, thread.modelSelection),
+              )
+                ? null
+                : thread,
+            ),
+            Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.succeed(null) }),
+          );
+
     /** Providers may reveal native subagent models late; lock full-row updates against concurrent thread commands. */
     const syncSubagentThreadModel = Effect.fn("ProviderEventIngestor.syncSubagentThreadModel")(
       function* (input: ProviderEventIngestInput, subagent: OrchestrationV2Subagent) {
-        const { childThreadId, model } = subagent;
-        if (
-          subagent.origin !== "provider_native" ||
-          childThreadId === null ||
-          (model === null && subagent.modelSelection === undefined)
-        ) {
-          return [];
-        }
-        const reportedSelection = ({ modelSelection }: { modelSelection: ModelSelection }) =>
-          subagent.modelSelection ??
-          (model === null || model === modelSelection.model
-            ? modelSelection
-            : { instanceId: modelSelection.instanceId, model });
-        const staleThread = projections.getThread(childThreadId).pipe(
-          Effect.map((thread) =>
-            modelSelectionsEqual(thread.modelSelection, reportedSelection(thread)) ? null : thread,
-          ),
-          Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.succeed(null) }),
-        );
-        if ((yield* staleThread) === null) return [];
+        // A shared commit cannot wait for the lock. Its consumer queued this update only after
+        // `needsThreadLock` found the model in sync; a change since then syncs on the next update.
+        if (yield* eventSink.inProviderBatch) return [];
+        const stale = yield* staleSubagentThread(subagent);
+        if (stale === null) return [];
         return yield* threadCommands.withLock(
-          childThreadId,
+          stale.id,
           Effect.gen(function* () {
-            const thread = yield* staleThread;
+            const thread = yield* staleSubagentThread(subagent);
             if (thread === null) return [];
             const now = yield* DateTime.now;
             const event = yield* makeDomainEvent(input, {
@@ -372,7 +383,7 @@ export const layer: Layer.Layer<
               threadId: thread.id,
               payload: {
                 ...thread,
-                modelSelection: reportedSelection(thread),
+                modelSelection: reportedSelection(subagent, thread.modelSelection),
                 updatedAt: now,
               },
               occurredAt: now,
@@ -699,6 +710,15 @@ export const layer: Layer.Layer<
 
     return ProviderEventIngestorV2.of({
       normalize,
+      // Checked for every queued provider snapshot; the run's ingestion span covers it.
+      needsThreadLock: Effect.fnUntraced(function* (event) {
+        if (event.type !== "subagent.updated") return false;
+        return yield* staleSubagentThread(event.subagent).pipe(
+          Effect.map((stale) => stale !== null),
+          // The locked path reads the thread again and fails as it would have.
+          Effect.orElseSucceed(() => true),
+        );
+      }),
       ingestNormalized:
         /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
         Effect.fnUntraced(

@@ -2285,7 +2285,9 @@ layer("ProviderEventIngestorV2", (it) => {
         },
       } satisfies ProviderEventIngestor.ProviderEventIngestInput["event"];
 
+      assert.isTrue(yield* ingestor.needsThreadLock(subagentUpdated));
       const first = yield* ingest(subagentUpdated);
+      assert.isFalse(yield* ingestor.needsThreadLock(subagentUpdated));
       const repeated = yield* ingest(subagentUpdated);
       const childThread = yield* projectionStore.getThread(childThreadId);
 
@@ -2310,10 +2312,19 @@ layer("ProviderEventIngestorV2", (it) => {
         model: "gpt-6.1-sol",
         options: [{ id: "reasoningEffort", value: "low" }],
       };
-      const reported = yield* ingest({
+      const reportedUpdate = {
         ...subagentUpdated,
         subagent: { ...subagentUpdated.subagent, modelSelection: reportedSelection },
-      });
+      };
+      assert.isTrue(yield* ingestor.needsThreadLock(reportedUpdate));
+      // A shared provider commit cannot wait for the lock, so the next update outside one syncs.
+      const shared = yield* eventSink.withProviderBatch(ingest(reportedUpdate));
+      assert.deepEqual(
+        shared.map((stored) => stored.event.type),
+        ["subagent.updated"],
+      );
+      assert.isTrue(yield* ingestor.needsThreadLock(reportedUpdate));
+      const reported = yield* ingest(reportedUpdate);
       assert.deepEqual(
         reported.map((stored) => stored.event.type),
         ["subagent.updated", "thread.model-selection-updated"],
