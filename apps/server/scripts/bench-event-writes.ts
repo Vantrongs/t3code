@@ -8,6 +8,7 @@
 //   record  --live <statev2.sqlite> --base <snapshot.sqlite> --window <window.sqlite> [--limit N]
 //   prepare --base <snapshot.sqlite>
 //   run     --base <snapshot.sqlite> --window <window.sqlite> [--runs 3] [--events N] [--out <dir>]
+//           [--reallocate-event-ids]
 //   live    --home <seeded T3 home> --project <git repo> [--model claude-haiku-5-5] [--out <dir>]
 //
 // `base` is a `VACUUM INTO` copy of a server database; `record` reads, read-only, the events the
@@ -22,7 +23,9 @@ import * as NodeSqlite from "node:sqlite";
 import * as NodeURL from "node:url";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { CommandId, ProviderSessionId, ThreadId } from "@t3tools/contracts";
 import type { OrchestrationV2StoredEvent } from "@t3tools/contracts";
+import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
@@ -336,6 +339,37 @@ const groupCommits = (
   return groups;
 };
 
+// The window's ids were allocated by the recording build. `--reallocate-event-ids` gives each
+// event a fresh id from this checkout's allocator, with the inputs the recorded id encodes
+// (`event:thread:<id>[:command:<id>][:provider-session:<id>]:<uuid>`), as production would at
+// write time; ids of any other shape stay as recorded.
+const allocatorInput = (id: string) => {
+  const parts = id.split(":");
+  if (parts[0] !== "event" || parts.length % 2 !== 0) return undefined;
+  const input: {
+    threadId?: ThreadId;
+    commandId?: CommandId;
+    providerSessionId?: ProviderSessionId;
+  } = {};
+  for (let i = 1; i < parts.length - 1; i += 2) {
+    const value = decodeURIComponent(parts[i + 1]!);
+    switch (parts[i]) {
+      case "thread":
+        input.threadId = ThreadId.make(value);
+        break;
+      case "command":
+        input.commandId = CommandId.make(value);
+        break;
+      case "provider-session":
+        input.providerSessionId = ProviderSessionId.make(value);
+        break;
+      default:
+        return undefined;
+    }
+  }
+  return input;
+};
+
 const replayMain = async () => {
   const base = flag("base");
   const window = flag("window");
@@ -365,6 +399,7 @@ const replayMain = async () => {
   const events = [
     ...(await Effect.runPromise(loadWindow(window, recordedBase, optionalNumber("events")))),
   ];
+  const reallocate = args.includes("--reallocate-event-ids");
   const groupingFile = args.includes("--grouping") ? flag("grouping") : undefined;
   const groups = groupCommits(
     events,
@@ -383,6 +418,7 @@ const replayMain = async () => {
     readonly commits: ReadonlyArray<CommitRecord>;
     readonly sequenceMismatches: number;
     readonly emptyWrites: number;
+    readonly reallocatedIds: number;
   };
   let hand: { resolve: (value: Replayed) => void; reject: (cause: unknown) => void };
   const handed = new Promise<Replayed>((resolve, reject) => {
@@ -393,15 +429,23 @@ const replayMain = async () => {
     // Checkpoints would write the base; their page cost is computed from the frames instead.
     yield* sql`PRAGMA wal_autocheckpoint = 0`;
     const sink = yield* EventSink.EventSinkV2;
+    const ids = yield* IdAllocator.IdAllocatorV2;
     readFrames();
     const commits: Array<CommitRecord> = [];
     let sequenceMismatches = 0;
     let emptyWrites = 0;
+    let reallocatedIds = 0;
     for (const group of groups) {
+      const toWrite = yield* Effect.forEach(group, (recorded) => {
+        const input = reallocate ? allocatorInput(recorded.event.id) : undefined;
+        if (input === undefined) return Effect.succeed(recorded.event);
+        reallocatedIds++;
+        return ids.allocate.event(input).pipe(Effect.map((id) => ({ ...recorded.event, id })));
+      });
       const started = performance.now();
       const stored = yield* sink.write({
         ...(group[0]!.commandId === null ? {} : { commandId: group[0]!.commandId }),
-        events: group.map((recorded) => recorded.event),
+        events: toWrite,
       });
       const ms = performance.now() - started;
       stored.forEach((written, i) => {
@@ -416,7 +460,7 @@ const replayMain = async () => {
         frames: written[0] ?? [],
       });
     }
-    hand.resolve({ commits, sequenceMismatches, emptyWrites });
+    hand.resolve({ commits, sequenceMismatches, emptyWrites, reallocatedIds });
     // The layer's scope ends with this effect, and closing the writer would checkpoint.
     return yield* Effect.never;
   }).pipe(
@@ -428,6 +472,7 @@ const replayMain = async () => {
             NodeSqliteClient.layer({ filename: base, readerWorker: true, checkpointWorker: false }),
           ),
         ),
+        Layer.provideMerge(IdAllocator.layer),
         Layer.provide(NodeServices.layer),
       ),
     ),
@@ -436,11 +481,13 @@ const replayMain = async () => {
   Effect.runFork(
     run.pipe(Effect.tapCause((cause) => Effect.sync(() => hand.reject(Cause.pretty(cause))))),
   );
-  const { commits, sequenceMismatches, emptyWrites } = await handed.catch((cause: unknown) => {
-    console.error(cause);
-    // A normal exit closes the connections in no fixed order; the pin must outlive the writer.
-    return process.kill(process.pid, "SIGKILL") as never;
-  });
+  const { commits, sequenceMismatches, emptyWrites, reallocatedIds } = await handed.catch(
+    (cause: unknown) => {
+      console.error(cause);
+      // A normal exit closes the connections in no fixed order; the pin must outlive the writer.
+      return process.kill(process.pid, "SIGKILL") as never;
+    },
+  );
 
   const endOwners = pageOwners(base);
   const startOwners = new Uint16Array(NodeFS.readFileSync(pageMapPath(base)).buffer.slice(0));
@@ -452,6 +499,7 @@ const replayMain = async () => {
         commits,
         sequenceMismatches,
         emptyWrites,
+        reallocatedIds,
         events: events.length,
         projectEvents,
         stamp,
@@ -471,6 +519,7 @@ const summarize = (input: {
   readonly commits: ReadonlyArray<CommitRecord>;
   readonly sequenceMismatches: number;
   readonly emptyWrites: number;
+  readonly reallocatedIds: number;
   readonly events: number;
   readonly stamp: Stamp;
   readonly startOwners: Uint16Array;
@@ -521,6 +570,7 @@ const summarize = (input: {
     writes: commits.length,
     commits: written.length,
     emptyWrites: input.emptyWrites,
+    reallocatedIds: input.reallocatedIds,
     sequenceMismatches: input.sequenceMismatches,
     frames,
     walBytes: input.walBytes,
@@ -582,8 +632,9 @@ const runMain = (input: {
   readonly out: string;
   readonly events: number | undefined;
   readonly grouping?: string | undefined;
+  readonly reallocate?: boolean;
 }) => {
-  const { base, window, runs, out, events, grouping } = input;
+  const { base, window, runs, out, events, grouping, reallocate } = input;
   readStamp(base);
   NodeFS.mkdirSync(out, { recursive: true });
   const script = NodeURL.fileURLToPath(import.meta.url);
@@ -607,6 +658,7 @@ const runMain = (input: {
         outPath,
         ...(events === undefined ? [] : ["--events", String(events)]),
         ...(grouping === undefined ? [] : ["--grouping", grouping]),
+        ...(reallocate === true ? ["--reallocate-event-ids"] : []),
       ],
       { stdio: "inherit" },
     );
@@ -641,7 +693,7 @@ const printReport = (report: {
   const r = report.first;
   const pct = (n: number) => `${((100 * n) / r.frames).toFixed(1)}%`;
   console.log(
-    `events ${r.events}, writes ${r.writes}, commits ${r.commits} (empty writes ${r.emptyWrites}, sequence mismatches ${r.sequenceMismatches}, project events not replayed ${r.projectEventsNotReplayed})`,
+    `events ${r.events}, writes ${r.writes}, commits ${r.commits} (empty writes ${r.emptyWrites}, sequence mismatches ${r.sequenceMismatches}, project events not replayed ${r.projectEventsNotReplayed}, event ids reallocated ${r.reallocatedIds})`,
   );
   console.log(
     `WAL frames ${r.frames}: ${r.framesPerEvent.toFixed(2)} per event, ${(r.walBytesPerEvent / 1024).toFixed(1)} KiB per event`,
@@ -893,6 +945,7 @@ switch (command) {
       out: flag("out", NodePath.join(NodePath.dirname(flag("base")), "results")),
       events: optionalNumber("events"),
       grouping: args.includes("--grouping") ? flag("grouping") : undefined,
+      reallocate: args.includes("--reallocate-event-ids"),
     });
     break;
   case "live":
