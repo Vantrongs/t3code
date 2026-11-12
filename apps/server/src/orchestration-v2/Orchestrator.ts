@@ -1477,12 +1477,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       command: OrchestrationV2ServerCommand,
       event: Omit<Event, "id">,
     ) {
-      const eventId = yield* mapDispatchError(command)(
-        idAllocator.allocate.event({
-          threadId: event.threadId,
-          commandId: command.commandId,
-        }),
-      );
+      const eventId = yield* mapDispatchError(command)(idAllocator.allocate.event());
       return {
         ...event,
         id: eventId,
@@ -1677,9 +1672,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     Effect.fnUntraced(function* <Event extends OrchestrationV2DomainEvent>(
       event: Omit<Event, "id">,
     ) {
-      const eventId = yield* idAllocator.allocate.event({
-        threadId: event.threadId,
-      });
+      const eventId = yield* idAllocator.allocate.event();
       return {
         ...event,
         id: eventId,
@@ -2980,7 +2973,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           })),
           {
             // A restart can return this run to the queue after its previous start effect was cancelled.
-            id: `effect:${commandId}:provider-turn.start:${queuedRun.id}:${yield* idAllocator.allocate.event({ threadId, commandId })}`,
+            id: `effect:${commandId}:provider-turn.start:${queuedRun.id}:${yield* idAllocator.allocate.event()}`,
             commandId,
             threadId,
             request: { type: "provider-turn.start", runId: queuedRun.id },
@@ -11548,11 +11541,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   }) {
     const emitEvent = emit(input.events, input.command);
     const runOrdinals = new Map(input.projection.runs.map((run) => [run.id, run.ordinal]));
-    const allocateEventId = () =>
-      idAllocator.allocate.event({
-        threadId: input.command.threadId,
-        commandId: input.command.commandId,
-      });
+    const allocateEventId = () => idAllocator.allocate.event();
     const childThreadIds = new Set<ThreadId>();
     const liveness = new Map<string, boolean>();
     const hasLiveSession = Effect.fn("Orchestrator.hasLiveSession")(function* (
@@ -11839,11 +11828,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       run,
       status: "interrupted",
       completedAt: input.now,
-      allocateEventId: () =>
-        idAllocator.allocate.event({
-          threadId: input.command.threadId,
-          commandId: input.command.commandId,
-        }),
+      allocateEventId: () => idAllocator.allocate.event(),
       open: {
         subagents: new Map(
           input.projection.subagents
@@ -12248,11 +12233,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         )
           return;
         const now = yield* DateTime.now;
-        const allocateEventId = () =>
-          idAllocator.allocate.event({
-            threadId: command.threadId,
-            commandId: command.commandId,
-          });
+        const allocateEventId = () => idAllocator.allocate.event();
         const ended = yield* endOrphanedNativeSubagent({
           projection,
           subagentId: subagent.id,

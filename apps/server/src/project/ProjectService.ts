@@ -260,9 +260,7 @@ export const make = Effect.gen(function* () {
                 .pipe(Effect.mapError(dispatchError)),
             );
       const now = yield* DateTime.now;
-      const eventId = yield* idAllocator.allocate
-        .event({ commandId: command.commandId })
-        .pipe(Effect.mapError(dispatchError));
+      const eventId = yield* idAllocator.allocate.event().pipe(Effect.mapError(dispatchError));
       const planned = planProjectCommand({
         command,
         state: { project, workspaceOwner },

@@ -93,7 +93,7 @@ const seedThread = Effect.gen(function* () {
   yield* eventSink.write({
     events: [
       {
-        id: yield* idAllocator.allocate.event({ threadId }),
+        id: yield* idAllocator.allocate.event(),
         type: "thread.created",
         threadId,
         occurredAt: now,
@@ -137,7 +137,7 @@ const writeCommandItem = (
     yield* eventSink.write({
       events: [
         {
-          id: yield* idAllocator.allocate.event({ threadId }),
+          id: yield* idAllocator.allocate.event(),
           type: "turn-item.updated",
           threadId,
           driver: CODEX_DRIVER,

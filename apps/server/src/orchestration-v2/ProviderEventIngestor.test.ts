@@ -219,7 +219,7 @@ function threadCreatedEvent(
     };
 
     return {
-      id: yield* idAllocator.allocate.event({ threadId }),
+      id: yield* idAllocator.allocate.event(),
       type: "thread.created",
       threadId,
       occurredAt: now,
@@ -555,7 +555,7 @@ layer("ProviderEventIngestorV2", (it) => {
       yield* eventSink.write({
         events: [
           {
-            id: yield* idAllocator.allocate.event({ threadId }),
+            id: yield* idAllocator.allocate.event(),
             type: "node.updated",
             threadId,
             occurredAt: now,
@@ -602,7 +602,7 @@ layer("ProviderEventIngestorV2", (it) => {
         const nodeId = NodeId.make(`node:rewound:${input.ordinal}`);
         const providerTurnId = ProviderTurnId.make(`provider-turn:rewound:${input.ordinal}`);
         const completedAt = input.status === "running" ? null : now;
-        const eventId = () => idAllocator.allocate.event({ threadId });
+        const eventId = () => idAllocator.allocate.event();
         const events: Array<OrchestrationV2DomainEvent> = [
           {
             id: yield* eventId(),
@@ -1219,7 +1219,7 @@ layer("ProviderEventIngestorV2", (it) => {
             { type: "turn-item.updated" as const, payload: fixture.item },
           ]) {
             seedEvents.push({
-              id: yield* idAllocator.allocate.event({ threadId }),
+              id: yield* idAllocator.allocate.event(),
               threadId,
               occurredAt: now,
               ...payload,
@@ -1382,7 +1382,7 @@ layer("ProviderEventIngestorV2", (it) => {
             { type: "turn-item.updated" as const, payload: item },
           ])
             seedEvents.push({
-              id: yield* idAllocator.allocate.event({ threadId }),
+              id: yield* idAllocator.allocate.event(),
               threadId,
               occurredAt: now,
               ...payload,
@@ -1442,7 +1442,7 @@ layer("ProviderEventIngestorV2", (it) => {
             },
           ])
             responseEvents.push({
-              id: yield* idAllocator.allocate.event({ threadId }),
+              id: yield* idAllocator.allocate.event(),
               threadId,
               occurredAt: now,
               ...payload,
@@ -1967,7 +1967,7 @@ layer("ProviderEventIngestorV2", (it) => {
           events: [
             {
               ...rootEvent,
-              id: yield* ids.allocate.event({ threadId: parent.id }),
+              id: yield* ids.allocate.event(),
               type: "thread.metadata-updated",
               payload: {
                 ...parent,
@@ -2114,7 +2114,7 @@ layer("ProviderEventIngestorV2", (it) => {
         events: [
           {
             ...rootEvent,
-            id: yield* idAllocator.allocate.event({ threadId: childThreadId }),
+            id: yield* idAllocator.allocate.event(),
             threadId: childThreadId,
             type: "thread.deleted",
             payload: saved,

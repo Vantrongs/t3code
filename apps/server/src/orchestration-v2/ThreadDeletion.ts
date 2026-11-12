@@ -31,10 +31,7 @@ export const planThreadDeletion = Effect.fn("ThreadDeletion.planThreadDeletion")
   const emitEvent = Effect.fn("ThreadDeletion.emitEvent")(function* <
     Event extends OrchestrationV2DomainEvent,
   >(event: Omit<Event, "id">) {
-    const id = yield* idAllocator.allocate.event({
-      threadId: event.threadId,
-      commandId: command.commandId,
-    });
+    const id = yield* idAllocator.allocate.event();
     const withId = { ...event, id } as Event;
     events.push(withId);
     if (withId.type === "run.updated") {

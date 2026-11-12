@@ -272,10 +272,7 @@ export const layer: Layer.Layer<
         },
       ) {
         const threadId = payloadInput.threadId ?? input.threadId;
-        const eventId = yield* idAllocator.allocate.event({
-          threadId,
-          providerSessionId: input.providerSessionId,
-        });
+        const eventId = yield* idAllocator.allocate.event();
         const occurredAt = payloadInput.occurredAt ?? (yield* DateTime.now);
         return yield* decodeDomainEvent(
           compactUndefined({
@@ -407,11 +404,7 @@ export const layer: Layer.Layer<
       });
       if (runs.length === 0) return [];
       const now = yield* DateTime.now;
-      const eventId = () =>
-        idAllocator.allocate.event({
-          threadId: rewind.threadId,
-          providerSessionId: input.providerSessionId,
-        });
+      const eventId = () => idAllocator.allocate.event();
       const runIds = new Set(runs.map((run) => run.id));
       const events: Array<OrchestrationV2DomainEvent> = [];
       for (const checkpoint of projection.checkpoints) {

@@ -29,7 +29,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
-import { randomUuidV4 } from "./randomUuid.ts";
+import { randomUuidV4, randomUuidV7 } from "./randomUuid.ts";
 
 export const IdAllocatorV2Kind = Schema.Literals([
   "command",
@@ -75,11 +75,7 @@ export interface IdAllocatorV2Allocate {
     readonly fixtureName: string;
     readonly commandName: string;
   }) => Effect.Effect<CommandId, IdAllocatorV2Error>;
-  readonly event: (input: {
-    readonly threadId?: ThreadId;
-    readonly commandId?: CommandId;
-    readonly providerSessionId?: ProviderSessionId;
-  }) => Effect.Effect<EventId, IdAllocatorV2Error>;
+  readonly event: () => Effect.Effect<EventId, IdAllocatorV2Error>;
   readonly rawEvent: (input: {
     readonly providerSessionId: ProviderSessionId;
     readonly method: string | null;
@@ -325,19 +321,13 @@ export const layer: Layer.Layer<IdAllocatorV2> = Layer.succeed(
           parts: ["fixture", input.fixtureName, input.commandName],
           make: CommandId.make,
         })(input),
-      event: (input) =>
-        randomId<EventId, typeof input>({
-          kind: "event",
-          prefix: "event",
-          parts: [
-            ...(input.threadId === undefined ? [] : ["thread", input.threadId]),
-            ...(input.commandId === undefined ? [] : ["command", input.commandId]),
-            ...(input.providerSessionId === undefined
-              ? []
-              : ["provider-session", input.providerSessionId]),
-          ],
-          make: EventId.make,
-        })(input),
+      // Every event inserts its id into the event_id UNIQUE index: a short, time-ordered key keeps
+      // that index small and its inserts in the last leaf. stream_id and command_id hold the rest.
+      event: () =>
+        randomUuidV7.pipe(
+          Effect.map((uuid) => EventId.make(`event:${uuid}`)),
+          Effect.mapError((cause) => new IdAllocatorV2AllocationError({ kind: "event", cause })),
+        ),
       rawEvent: (input) =>
         randomId<RawEventId, typeof input>({
           kind: "raw_event",

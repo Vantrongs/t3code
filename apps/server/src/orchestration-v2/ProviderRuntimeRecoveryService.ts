@@ -282,7 +282,7 @@ export const make = Effect.gen(function* () {
         `command:runtime-reconcile:${trigger}:${projection.thread.id}:${DateTime.formatIso(now)}`,
       );
       const allocateEventId = () =>
-        ids.allocate.event({ threadId: projection.thread.id, commandId }).pipe(
+        ids.allocate.event().pipe(
           Effect.mapError(
             (cause) =>
               new ProviderRuntimeRecoveryError({

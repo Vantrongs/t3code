@@ -278,7 +278,7 @@ const make = Effect.gen(function* () {
       yield* eventSink.write({
         events: [
           {
-            id: yield* ids.allocate.event({ threadId }),
+            id: yield* ids.allocate.event(),
             type: "turn-item.updated",
             threadId,
             runId,

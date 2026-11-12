@@ -679,7 +679,7 @@ export const layer: Layer.Layer<
                 effects: [],
                 events: [
                   {
-                    id: yield* idAllocator.allocate.event({ threadId: input.run.threadId }),
+                    id: yield* idAllocator.allocate.event(),
                     type: "turn-item.updated" as const,
                     threadId: input.run.threadId,
                     runId: input.run.id,
@@ -702,7 +702,7 @@ export const layer: Layer.Layer<
           }
           return false;
         }
-        const allocateEventId = () => idAllocator.allocate.event({ threadId: input.run.threadId });
+        const allocateEventId = () => idAllocator.allocate.event();
         const reason =
           input.terminal.status === "interrupted"
             ? ((input.loadRunInterruptReason === undefined

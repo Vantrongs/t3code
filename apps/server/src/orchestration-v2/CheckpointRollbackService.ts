@@ -303,7 +303,7 @@ export const layer: Layer.Layer<
           const now = yield* DateTime.now;
           const makeEvent = <Event extends OrchestrationV2DomainEvent>(event: Omit<Event, "id">) =>
             Effect.map(
-              ids.allocate.event({ threadId: event.threadId }),
+              ids.allocate.event(),
               (id) =>
                 ({
                   ...event,

@@ -280,7 +280,7 @@ function makeThreadCreatedEvent(input: {
       deletedAt: null,
     };
     return {
-      id: yield* input.idAllocator.allocate.event({ threadId: input.threadId }),
+      id: yield* input.idAllocator.allocate.event(),
       type: "thread.created" as const,
       threadId: input.threadId,
       occurredAt: input.now,
@@ -366,14 +366,14 @@ const makeNativeChildFixture = Effect.fnUntraced(function* () {
         },
       },
       {
-        id: yield* idAllocator.allocate.event({ threadId: childThreadId }),
+        id: yield* idAllocator.allocate.event(),
         type: "provider-thread.updated",
         threadId: childThreadId,
         occurredAt: now,
         payload: childProviderThread,
       },
       {
-        id: yield* idAllocator.allocate.event({ threadId: parentThreadId }),
+        id: yield* idAllocator.allocate.event(),
         type: "subagent.updated",
         threadId: parentThreadId,
         occurredAt: now,
@@ -936,10 +936,7 @@ function makePendingRuntimeRequestEvents(input: {
     };
     const events = [
       {
-        id: yield* input.idAllocator.allocate.event({
-          threadId: input.threadId,
-          providerSessionId: input.providerSessionId,
-        }),
+        id: yield* input.idAllocator.allocate.event(),
         type: "node.updated" as const,
         threadId: input.threadId,
         nodeId,
@@ -948,10 +945,7 @@ function makePendingRuntimeRequestEvents(input: {
         payload: node,
       },
       {
-        id: yield* input.idAllocator.allocate.event({
-          threadId: input.threadId,
-          providerSessionId: input.providerSessionId,
-        }),
+        id: yield* input.idAllocator.allocate.event(),
         type: "runtime-request.updated" as const,
         threadId: input.threadId,
         nodeId,
@@ -960,10 +954,7 @@ function makePendingRuntimeRequestEvents(input: {
         payload: request,
       },
       {
-        id: yield* input.idAllocator.allocate.event({
-          threadId: input.threadId,
-          providerSessionId: input.providerSessionId,
-        }),
+        id: yield* input.idAllocator.allocate.event(),
         type: "turn-item.updated" as const,
         threadId: input.threadId,
         nodeId,
@@ -1816,7 +1807,7 @@ it.effect(
         yield* eventSink.write({
           events: [
             {
-              id: yield* idAllocator.allocate.event({ threadId, providerSessionId }),
+              id: yield* idAllocator.allocate.event(),
               type: "provider-session.updated",
               threadId,
               driver: CODEX_DRIVER,
@@ -2127,7 +2118,7 @@ it.effect("ProviderSessionManagerV2 fails a turn whose provider retry never resu
         events: [
           yield* makeThreadCreatedEvent({ idAllocator, threadId, now }),
           {
-            id: yield* idAllocator.allocate.event({ threadId }),
+            id: yield* idAllocator.allocate.event(),
             type: "provider-thread.updated",
             threadId,
             occurredAt: now,
@@ -3100,7 +3091,7 @@ it.effect(
           events: [
             {
               ...created,
-              id: yield* idAllocator.allocate.event({ threadId }),
+              id: yield* idAllocator.allocate.event(),
               type: "thread.deleted",
               payload: { ...created.payload, deletedAt: now },
             },
@@ -3157,7 +3148,7 @@ const openSessionWithBackgroundCommand = (fixtureName: string) =>
         yield* eventSink.write({
           events: [
             {
-              id: yield* idAllocator.allocate.event({ threadId }),
+              id: yield* idAllocator.allocate.event(),
               type: "provider-thread.updated",
               threadId,
               driver: CODEX_DRIVER,
@@ -4230,7 +4221,7 @@ it.effect.each([
         yield* eventSink.write({
           events: [
             {
-              id: yield* idAllocator.allocate.event({ threadId: firstThreadId }),
+              id: yield* idAllocator.allocate.event(),
               type: "provider-thread.updated",
               threadId: firstThreadId,
               driver: CODEX_DRIVER,
@@ -4238,7 +4229,7 @@ it.effect.each([
               payload: firstProviderThread,
             },
             {
-              id: yield* idAllocator.allocate.event({ threadId: firstThreadId }),
+              id: yield* idAllocator.allocate.event(),
               type: "provider-turn.updated",
               threadId: firstThreadId,
               runId: firstRunId,
@@ -4510,7 +4501,7 @@ it.effect(
             yield* makeThreadCreatedEvent({ idAllocator, threadId: parentThreadId, now }),
             yield* makeThreadCreatedEvent({ idAllocator, threadId: childThreadId, now }),
             {
-              id: yield* idAllocator.allocate.event({ threadId: parentThreadId }),
+              id: yield* idAllocator.allocate.event(),
               type: "provider-thread.updated",
               threadId: parentThreadId,
               driver: CODEX_DRIVER,
@@ -4518,7 +4509,7 @@ it.effect(
               payload: parentProviderThread,
             },
             {
-              id: yield* idAllocator.allocate.event({ threadId: childThreadId }),
+              id: yield* idAllocator.allocate.event(),
               type: "provider-thread.updated",
               threadId: childThreadId,
               driver: CODEX_DRIVER,
@@ -4528,7 +4519,7 @@ it.effect(
             // The delegated task record already finished; the child was then sent a
             // follow-up and is running a later turn of its own.
             {
-              id: yield* idAllocator.allocate.event({ threadId: parentThreadId }),
+              id: yield* idAllocator.allocate.event(),
               type: "subagent.updated",
               threadId: parentThreadId,
               nodeId: subagentId,
@@ -4557,7 +4548,7 @@ it.effect(
               },
             },
             {
-              id: yield* idAllocator.allocate.event({ threadId: childThreadId }),
+              id: yield* idAllocator.allocate.event(),
               type: "provider-turn.updated",
               threadId: childThreadId,
               runId: childRunId,
@@ -4811,7 +4802,7 @@ it.effect.each([
           const taskEvent = (state: "pending" | "delivered") =>
             Effect.gen(function* () {
               return {
-                id: yield* idAllocator.allocate.event({ threadId: parentThreadId }),
+                id: yield* idAllocator.allocate.event(),
                 type: "subagent.updated",
                 threadId: parentThreadId,
                 nodeId: taskId,
@@ -4971,7 +4962,7 @@ it.effect(
             yield* makeThreadCreatedEvent({ idAllocator, threadId, now }),
             yield* makeThreadCreatedEvent({ idAllocator, threadId: otherThreadId, now }),
             {
-              id: yield* idAllocator.allocate.event({ threadId }),
+              id: yield* idAllocator.allocate.event(),
               type: "provider-thread.updated",
               threadId,
               driver: CODEX_DRIVER,
