@@ -1,5 +1,12 @@
 import "~/index.css";
-import { EnvironmentId, ProviderDriverKind, ThreadId, TurnItemId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  NodeId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ThreadId,
+  TurnItemId,
+} from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import { expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
@@ -68,6 +75,7 @@ it("opens full command details for short labels and keeps pending tasks current"
             ordinal: 2,
           },
         ],
+        subagents: [],
         stopDisabled: false,
         stopping: false,
         onStop: async () => undefined,
@@ -94,4 +102,68 @@ it("opens full command details for short labels and keeps pending tasks current"
   await expect.element(page.getByText("Command output stream")).toBeVisible();
   await page.getByRole("button", { name: "Close", exact: true }).click();
   await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+});
+
+it("shows a running subagent's latest progress from its record", async () => {
+  const at = DateTime.makeUnsafe("2026-11-09T00:00:00Z");
+  const subagentId = NodeId.make("subagent-1");
+  const driver = ProviderDriverKind.make("claudeAgent");
+  const providerInstanceId = ProviderInstanceId.make("claudeAgent");
+  const base = {
+    threadId: ThreadId.make("thread"),
+    runId: null,
+    providerThreadId: null,
+    childThreadId: null,
+    prompt: "Map the repository",
+    title: "Explore",
+    status: "running" as const,
+    result: null,
+    startedAt: at,
+    completedAt: null,
+    updatedAt: at,
+    origin: "provider_native" as const,
+    driver,
+    providerInstanceId,
+  };
+  await using _screen = await render(
+    <ThreadNow
+      attention={null}
+      syncPhase={null}
+      goal={null}
+      work={backgroundWorkNowItem({
+        environmentId: EnvironmentId.make("test"),
+        threadId: ThreadId.make("thread"),
+        tasks: [{ taskId: "native-task", kind: "subagent", description: "Explore" }],
+        turnItems: [
+          {
+            ...base,
+            id: TurnItemId.make("subagent-item"),
+            nodeId: subagentId,
+            providerTurnId: null,
+            nativeItemRef: { driver, nativeId: "native-task", strength: "strong" },
+            parentItemId: null,
+            ordinal: 1,
+            type: "subagent",
+            subagentId,
+          },
+        ],
+        subagents: [
+          {
+            ...base,
+            id: subagentId,
+            parentNodeId: NodeId.make("root"),
+            createdBy: "agent",
+            nativeTaskRef: { driver, nativeId: "native-task", strength: "strong" },
+            model: null,
+            progress: "Reading   package.json",
+          },
+        ],
+        stopDisabled: false,
+        stopping: false,
+        onStop: async () => undefined,
+        onOpenThread: () => undefined,
+      })}
+    />,
+  );
+  await expect.element(page.getByText("Reading package.json")).toBeVisible();
 });

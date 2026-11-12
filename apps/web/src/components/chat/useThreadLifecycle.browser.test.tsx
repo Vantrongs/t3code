@@ -120,6 +120,7 @@ function RestoreBranchHarness(props: {
     runIsLive: false,
     pendingBackgroundTasks: [{ taskId: "background-command", kind: "command" }] as never,
     turnItems: [],
+    subagents: [],
     activePendingApproval: null as never,
     activePendingUserInput: null as never,
     gitStatusQuery: { refresh: props.refreshGitStatus },

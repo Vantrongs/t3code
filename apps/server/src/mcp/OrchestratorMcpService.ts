@@ -949,7 +949,7 @@ function jsonText(value: unknown): string {
   }
 }
 
-function turnItemText(item: OrchestrationV2TurnItem): string | null {
+function turnItemText(item: OrchestrationV2TurnItem, subagentProgress?: string): string | null {
   switch (item.type) {
     case "notification":
       return [item.summary, item.detail].filter((part) => part !== undefined).join("\n");
@@ -1010,7 +1010,7 @@ function turnItemText(item: OrchestrationV2TurnItem): string | null {
         ? `Linked ${item.linkedLabel ?? item.url ?? "an environment"} (${item.linkedAccess}).`
         : `Asked the user to link ${item.url ?? "an environment"}: ${item.linkStatus}.`;
     case "subagent":
-      return item.result ?? item.progress ?? item.prompt;
+      return item.result ?? subagentProgress ?? item.prompt;
     case "dynamic_tool":
       return jsonText({ toolName: item.toolName, input: item.input, output: item.output });
   }
@@ -1030,8 +1030,14 @@ function timelineItem(input: {
   readonly maxChars: number;
   readonly textOffset?: number;
   readonly messagesByThreadId: ReadonlyMap<ThreadId, OrchestrationV2ThreadProjection["messages"]>;
+  readonly subagentProgress: ReadonlyMap<NodeId, string>;
 }): OrchestratorMcpThreadTimelineItem {
-  const text = turnItemText(input.row.item);
+  const text = turnItemText(
+    input.row.item,
+    input.row.item.type === "subagent"
+      ? input.subagentProgress.get(input.row.item.subagentId)
+      : undefined,
+  );
   const offset = input.textOffset ?? 0;
   const end = textPageEnd(text, offset, input.maxChars);
   const textTruncated = text !== null && text.length > end;
@@ -3058,6 +3064,19 @@ const make = Effect.gen(function* () {
         { concurrency: 1 },
       );
       const messagesByThreadId = new Map(sourceMessages);
+      const subagentIdsByThread = new Map<ThreadId, Array<NodeId>>();
+      for (const row of page) {
+        if (row.item.type !== "subagent") continue;
+        const ids = subagentIdsByThread.get(row.item.threadId) ?? [];
+        ids.push(row.item.subagentId);
+        subagentIdsByThread.set(row.item.threadId, ids);
+      }
+      const subagentProgress = new Map<NodeId, string>();
+      for (const [threadId, subagentIds] of subagentIdsByThread) {
+        for (const subagent of yield* loadTasks(threadId, subagentIds)) {
+          if (subagent.progress !== undefined) subagentProgress.set(subagent.id, subagent.progress);
+        }
+      }
       const returnedRunIds = new Set(
         page.filter((row) => row.sourceThreadId === target.thread.id).map((row) => row.item.runId),
       );
@@ -3130,6 +3149,7 @@ const make = Effect.gen(function* () {
             row,
             maxChars,
             messagesByThreadId,
+            subagentProgress,
             ...(input.itemId === undefined ? {} : { textOffset: input.textOffset ?? 0 }),
           }),
         ),

@@ -569,6 +569,69 @@ layer("ProviderEventIngestorV2", (it) => {
     }),
   );
 
+  it.effect("skips a subagent item that differs from the stored one only in its update time", () =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const later = DateTime.add(now, { seconds: 7 });
+      const eventSink = yield* EventSink.EventSinkV2;
+      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+      const ingestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
+      const idAllocator = yield* IdAllocator.IdAllocatorV2;
+      const threadEvent = yield* threadCreatedEvent(now);
+      const threadId = threadEvent.threadId;
+      yield* eventSink.write({ events: [threadEvent] });
+      const providerSessionId = yield* idAllocator.allocate.providerSession({
+        providerInstanceId: modelSelection.instanceId,
+        threadId,
+      });
+      const subagentId = NodeId.make(`${threadId}:subagent`);
+      const item: Extract<OrchestrationV2TurnItem, { readonly type: "subagent" }> = {
+        id: TurnItemId.make(`${threadId}:subagent-item`),
+        threadId,
+        runId: null,
+        nodeId: subagentId,
+        providerThreadId: null,
+        providerTurnId: null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal: 1,
+        status: "running",
+        title: "Explore",
+        startedAt: now,
+        completedAt: null,
+        updatedAt: now,
+        type: "subagent",
+        subagentId,
+        origin: "provider_native",
+        driver: CODEX_DRIVER,
+        providerInstanceId: modelSelection.instanceId,
+        childThreadId: null,
+        prompt: "Map the repository",
+        result: null,
+      };
+      const ingestItem = (sent: OrchestrationV2TurnItem) =>
+        ingestor.ingestNormalized({
+          providerSessionId,
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+          event: { type: "turn_item.updated", driver: CODEX_DRIVER, turnItem: sent },
+        });
+
+      assert.lengthOf(yield* ingestItem(item), 1);
+      // Adapters resend the item with each progress line of the subagent record.
+      assert.isEmpty(yield* ingestItem({ ...item, ordinal: 2, updatedAt: later }));
+      const completed = {
+        ...item,
+        status: "completed" as const,
+        completedAt: later,
+        updatedAt: later,
+      };
+      assert.lengthOf(yield* ingestItem(completed), 1);
+      const projection = yield* projectionStore.getThreadProjection(threadId);
+      assert.equal(projection.turnItems.find((entry) => entry.id === item.id)?.status, "completed");
+    }),
+  );
+
   it.effect("rolls back runs a provider rewound off its active branch", () =>
     Effect.gen(function* () {
       const now = yield* DateTime.now;

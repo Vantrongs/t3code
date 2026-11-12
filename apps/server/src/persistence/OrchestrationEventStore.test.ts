@@ -143,7 +143,7 @@ layer("OrchestrationEventStore", (it) => {
             updatedAt: now,
           },
         }) satisfies OrchestrationV2DomainEvent;
-      const item = (index: number, progress: string, nextPrompt = prompt) =>
+      const item = (index: number, nextPrompt = prompt) =>
         ({
           id: EventId.make(`event:subagent-prompt:item:${index}`),
           type: "turn-item.updated",
@@ -168,7 +168,6 @@ layer("OrchestrationEventStore", (it) => {
             providerInstanceId,
             childThreadId: null,
             prompt: nextPrompt,
-            progress,
             result: null,
             startedAt: now,
             completedAt: null,
@@ -177,13 +176,13 @@ layer("OrchestrationEventStore", (it) => {
         }) satisfies OrchestrationV2DomainEvent;
       const events = [
         subagent(0, "Reading files"),
-        item(0, "Reading files"),
+        item(0),
         subagent(1, "Running tests"),
-        item(1, "Running tests"),
+        item(1),
         subagent(2, "Writing report"),
-        item(2, "Writing report"),
+        item(2),
         subagent(3, "Retrying", "Audit again."),
-        item(3, "Retrying", "Audit again."),
+        item(3, "Audit again."),
       ];
       yield* store.appendAgentEvents({ events });
 

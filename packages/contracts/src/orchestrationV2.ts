@@ -1862,7 +1862,7 @@ export const OrchestrationV2TurnItem = Schema.Union([
     childThreadId: Schema.NullOr(ThreadId),
     remoteChild: Schema.optional(OrchestrationV2RemoteTaskChild),
     prompt: Schema.String,
-    progress: Schema.optional(Schema.String),
+    // Progress lives only on subagent `subagentId`, so a progress line does not rewrite this item.
     result: Schema.NullOr(Schema.String),
     /** Same as the prompt and result of subagent `subagentId`. */
     promptOmitted: DedupedBodyMarker,
@@ -2705,7 +2705,6 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
     childThreadId: Schema.NullOr(ThreadId),
     remoteChild: Schema.optional(OrchestrationV2RemoteTaskChild),
     prompt: Schema.String,
-    progress: Schema.optional(Schema.String),
     result: Schema.NullOr(Schema.String),
   }),
   Schema.Struct({

@@ -173,6 +173,7 @@ export function backgroundWorkNowItem(input: {
   readonly threadId: ThreadId;
   readonly tasks: ReadonlyArray<OrchestrationV2PendingBackgroundTask>;
   readonly turnItems: ThreadStructure["turnItems"];
+  readonly subagents: ThreadStructure["subagents"];
   readonly stopDisabled: boolean;
   readonly stopping: boolean;
   readonly onStop: () => Promise<void>;
@@ -182,11 +183,12 @@ export function backgroundWorkNowItem(input: {
   const presentation = presentPendingBackgroundWork(input.tasks);
   if (presentation === null) return null;
   const rows = presentation.items.map((task) => {
-    // Same key derivePendingBackgroundWork gives turn-item tasks; subagent items carry progress.
+    // Same key derivePendingBackgroundWork gives turn-item tasks.
     const item = input.turnItems.findLast(
       (candidate) => (candidate.nativeItemRef?.nativeId || candidate.id) === task.taskId,
     );
-    const subagent = item?.type === "subagent" ? item : undefined;
+    const subagentItem = item?.type === "subagent" ? item : undefined;
+    const subagent = input.subagents.find((record) => record.id === subagentItem?.subagentId);
     return {
       task,
       label:
@@ -202,7 +204,7 @@ export function backgroundWorkNowItem(input: {
       activity: subagent?.progress?.replace(/\s+/gu, " ").trim() || null,
       startedAtMs: item?.startedAt ? DateTime.toEpochMillis(item.startedAt) : null,
       updatedAtMs: subagent ? DateTime.toEpochMillis(subagent.updatedAt) : 0,
-      childThreadId: task.childThreadId ?? subagent?.childThreadId ?? undefined,
+      childThreadId: task.childThreadId ?? subagentItem?.childThreadId ?? undefined,
     };
   });
   const [only] = rows.length === 1 ? rows : [];

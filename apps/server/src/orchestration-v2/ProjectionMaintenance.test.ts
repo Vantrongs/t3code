@@ -215,7 +215,6 @@ function subagentEvents(
         providerInstanceId,
         childThreadId: null,
         prompt,
-        progress,
         result: null,
       },
     },

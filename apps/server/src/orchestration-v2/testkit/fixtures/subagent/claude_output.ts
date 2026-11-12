@@ -117,6 +117,6 @@ export function assertClaudeSubagentOutput(
     if (parentItem?.type !== "subagent") {
       throw new Error(`Missing parent lifecycle item for subagent ${subagent.id}`);
     }
-    assert.equal(parentItem.progress, expectedProgress);
+    assert.equal(parentItem.status, "completed");
   }
 }

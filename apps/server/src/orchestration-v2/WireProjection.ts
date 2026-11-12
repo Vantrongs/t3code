@@ -188,7 +188,6 @@ export function projectTurnItemForWire(item: OrchestrationV2TurnItem): Orchestra
       return {
         ...item,
         prompt: truncateDetail(item.prompt) ?? "",
-        progress: truncateDetail(item.progress),
         result: item.result === null ? null : (truncateDetail(item.result) ?? null),
       };
     case "dynamic_tool": {
@@ -259,7 +258,6 @@ export function projectTurnItemForDetail(item: OrchestrationV2TurnItem): Orchest
       return {
         ...item,
         prompt: truncateDetail(item.prompt, MAX_ON_DEMAND_BYTES) ?? "",
-        progress: truncateDetail(item.progress, MAX_ON_DEMAND_BYTES),
         result:
           item.result === null ? null : (truncateDetail(item.result, MAX_ON_DEMAND_BYTES) ?? null),
       };

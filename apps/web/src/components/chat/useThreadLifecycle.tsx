@@ -109,6 +109,7 @@ interface ThreadLifecycleInput {
   readonly runIsLive: boolean;
   readonly pendingBackgroundTasks: Parameters<typeof backgroundWorkNowItem>[0]["tasks"];
   readonly turnItems: Parameters<typeof backgroundWorkNowItem>[0]["turnItems"];
+  readonly subagents: Parameters<typeof backgroundWorkNowItem>[0]["subagents"];
   readonly activePendingApproval: PendingThreadRequests["activePendingApproval"];
   readonly activePendingUserInput: PendingThreadRequests["activePendingUserInput"];
   readonly localCheckoutBranchMismatch: {
@@ -162,6 +163,7 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
     runIsLive,
     pendingBackgroundTasks,
     turnItems,
+    subagents,
     activePendingApproval,
     activePendingUserInput,
     localCheckoutBranchMismatch,
@@ -601,6 +603,7 @@ export function useThreadLifecycle(input: ThreadLifecycleInput) {
         threadId: activeThread.id,
         tasks: activeBackgroundTasks,
         turnItems,
+        subagents,
         // Interrupt stops the active run first, not this work; the composer owns that Stop.
         stopDisabled: runIsLive || !canOperateThread || isStoppingBackgroundWork,
         stopping: isStoppingBackgroundWork,

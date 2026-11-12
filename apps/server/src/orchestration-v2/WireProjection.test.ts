@@ -189,7 +189,7 @@ describe("orchestration V2 wire projection", () => {
   it("truncates detail at a UTF-8 boundary without changing the source", () => {
     const marker = "\n… output truncated for transport";
     const prefixBytes = 32_768 - Buffer.byteLength(marker);
-    const progress = "a".repeat(prefixBytes - 1) + "😀" + "x".repeat(100_000);
+    const result = "a".repeat(prefixBytes - 1) + "😀" + "x".repeat(100_000);
     const item = {
       ...base,
       type: "subagent" as const,
@@ -199,18 +199,17 @@ describe("orchestration V2 wire projection", () => {
       providerInstanceId: ProviderInstanceId.make("codex"),
       childThreadId: null,
       prompt: "漢".repeat(12_000),
-      result: null,
-      progress,
+      result,
     };
     const projected = projectTurnItemForWire(item);
     expect(projectTurnItemForWire(projected)).toEqual(projected);
     expect(
       Buffer.byteLength(projected.type === "subagent" ? projected.prompt : ""),
     ).toBeLessThanOrEqual(32_768);
-    expect(projected.type === "subagent" ? projected.progress : null).toBe(
+    expect(projected.type === "subagent" ? projected.result : null).toBe(
       "a".repeat(prefixBytes - 1) + marker,
     );
-    expect(item.progress).toBe(progress);
+    expect(item.result).toBe(result);
   });
 
   it("leaves a screenshot's bytes out of the fetched tool output", () => {

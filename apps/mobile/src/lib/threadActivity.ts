@@ -700,7 +700,7 @@ function itemPreview(item: OrchestrationV2TurnItem): string | null {
     case "link_request":
       return item.reason || null;
     case "subagent":
-      return item.result ?? item.progress ?? item.prompt;
+      return item.result ?? item.prompt;
     case "dynamic_tool":
       return null;
     case "notification":

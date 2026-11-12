@@ -7,6 +7,7 @@ import {
   type OrchestrationV2Run,
   type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
+  OrchestrationV2TurnItem,
   type ModelSelection,
   ProviderInstanceId,
   ProviderSessionId,
@@ -76,6 +77,8 @@ const isLockTimeout = (error: EventSink.EventSinkV2Error) =>
   SqlError.isSqlError(error.cause) && error.cause.reason._tag === "LockTimeoutError";
 const retryLockTimeout = <A, R>(write: Effect.Effect<A, EventSink.EventSinkV2Error, R>) =>
   Effect.retry(write, { while: isLockTimeout, times: 2 });
+
+const sameTurnItem = Schema.toEquivalence(OrchestrationV2TurnItem);
 
 export const ProviderEventIngestorV2Error = Schema.Union([
   ProviderEventNormalizeError,
@@ -569,18 +572,35 @@ export const layer: Layer.Layer<
                   nodeId: input.event.message.nodeId,
                 }),
               ];
-            case "turn_item.updated":
+            case "turn_item.updated": {
+              const item = input.event.turnItem;
+              // Adapters resend a subagent's item with each progress line of its record. The
+              // sink keeps the stored ordinal, so a resend that changes nothing else is dropped.
+              if (item.type === "subagent") {
+                const stored = yield* projections.getTurnItem({
+                  threadId: item.threadId,
+                  itemId: item.id,
+                });
+                if (
+                  stored !== null &&
+                  sameTurnItem(stored, {
+                    ...item,
+                    ordinal: stored.ordinal,
+                    updatedAt: stored.updatedAt,
+                  })
+                )
+                  return [];
+              }
               return [
                 yield* makeDomainEvent(input, {
                   type: "turn-item.updated",
-                  threadId: input.event.turnItem.threadId,
-                  payload: boundFileChangeForStorage(
-                    stripUnservedToolOutputImageBytes(input.event.turnItem),
-                  ),
-                  runId: input.event.turnItem.runId,
-                  nodeId: input.event.turnItem.nodeId,
+                  threadId: item.threadId,
+                  payload: boundFileChangeForStorage(stripUnservedToolOutputImageBytes(item)),
+                  runId: item.runId,
+                  nodeId: item.nodeId,
                 }),
               ];
+            }
             case "runtime_request.updated":
               return [
                 yield* makeDomainEvent(input, {
