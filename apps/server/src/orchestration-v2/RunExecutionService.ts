@@ -1686,7 +1686,15 @@ export const layer: Layer.Layer<
               event.type === "idle_flush"
                 ? flushIdleAssistantText(event.at)
                 : Effect.gen(function* () {
-                    yield* ingestEvent(yield* routeEvent(event));
+                    const members = ProviderAdapter.providerEventMembers(event);
+                    const ingestMembers = Effect.forEach(
+                      members,
+                      (member) => Effect.flatMap(routeEvent(member), ingestEvent),
+                      { discard: true },
+                    );
+                    yield* members.length === 1
+                      ? ingestMembers
+                      : providerEventIngestor.ingestTogether(ingestMembers);
                   }),
             Effect.gen(function* () {
               if (yield* agentTurnsSettled) yield* endPreviewActivity;

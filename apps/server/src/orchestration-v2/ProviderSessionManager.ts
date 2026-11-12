@@ -2415,7 +2415,9 @@ export const layerWithOptions = (
           readonly armed?: ProviderRetryItem;
           readonly settled?: ProviderTurnId;
         } => {
-          noteThreadActivity(event);
+          for (const member of ProviderAdapter.providerEventMembers(event)) {
+            noteThreadActivity(member);
+          }
           if (event.type === "turn_item.updated") {
             const item = event.turnItem;
             if (

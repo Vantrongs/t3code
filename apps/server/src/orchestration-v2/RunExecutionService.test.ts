@@ -1954,6 +1954,51 @@ it.effect("keeps ingesting a child thread's late background item completion", ()
   }),
 );
 
+it.effect.each([false, true])(
+  "handles a subagent record and its paired item as two events in one write (batched: %s)",
+  (batched) =>
+    Effect.gen(function* () {
+      const writes: Array<string> = [];
+      const observed = yield* runBackgroundItemScenario(
+        `paired-subagent-item-${batched}`,
+        (ids) => {
+          const record = subagentEvent(ids, "running");
+          const item = backgroundTurnItemEvent(ids, "subagent", "running", 1);
+          if (record.type !== "subagent.updated" || item.type !== "turn_item.updated")
+            throw new Error("Missing subagent fixture");
+          return [
+            { ...record, turnItem: item.turnItem } as ProviderAdapter.ProviderAdapterV2Event,
+            rootTerminalEvent(ids, "completed"),
+            subagentEvent(ids, "completed"),
+            // Only the paired item's running state keeps the run ingesting until this one.
+            backgroundTurnItemEvent(ids, "subagent", "completed", 2),
+          ];
+        },
+        {
+          batched,
+          onIngest: (event, write) =>
+            Effect.sync(() => {
+              writes.push(`${event.type} ${write.together ?? "alone"}`);
+            }),
+        },
+      );
+      assert.deepEqual(observed, [
+        "subagent:running",
+        "turn_item:running",
+        "root-finalized",
+        "subagent:completed",
+        "turn_item:completed",
+      ]);
+      assert.deepEqual(writes, [
+        "subagent.updated 1",
+        "turn_item.updated 1",
+        "turn.terminal alone",
+        "subagent.updated alone",
+        "turn_item.updated alone",
+      ]);
+    }),
+);
+
 it.effect.each([null, "run:nested-sdk"] as const)(
   "releases a settled run when its live child transfers to another run (%s)",
   (nestedRunId) =>
@@ -3994,7 +4039,7 @@ function runBackgroundItemScenario(
   options?: {
     readonly onIngest?: (
       event: ProviderAdapter.ProviderAdapterV2Event,
-      write: { readonly inSharedCommit: boolean },
+      write: { readonly inSharedCommit: boolean; readonly together: number | undefined },
     ) => Effect.Effect<void>;
     // Consumes through the real commit coordinator, as the event sink does.
     readonly batched?: boolean;
@@ -4024,6 +4069,8 @@ function runBackgroundItemScenario(
       Effect.provide(PreviewAgentActivity.layer),
     );
     let inSharedCommit = false;
+    let togetherCalls = 0;
+    let together: number | undefined;
     const coordinator =
       options?.batched === true
         ? yield* ProviderCommitBatch.make(
@@ -4071,7 +4118,7 @@ function runBackgroundItemScenario(
             ingestNormalized: (input) => {
               const write = Effect.gen(function* () {
                 const event = input.event;
-                yield* options?.onIngest?.(event, { inSharedCommit }) ?? Effect.void;
+                yield* options?.onIngest?.(event, { inSharedCommit, together }) ?? Effect.void;
                 if (event.type === "turn_item.updated") {
                   yield* Ref.update(observed, (current) => [
                     ...current,
@@ -4092,6 +4139,17 @@ function runBackgroundItemScenario(
               // A write outside a batch waits for queued snapshots, as the event sink's does.
               return coordinator === undefined ? write : coordinator.barrier(write);
             },
+            ingestTogether: (ingest) =>
+              Effect.suspend(() => {
+                together = ++togetherCalls;
+                return ingest;
+              }).pipe(
+                Effect.ensuring(
+                  Effect.sync(() => {
+                    together = undefined;
+                  }),
+                ),
+              ),
           }),
           ServerSettings.layerTest(),
         ),

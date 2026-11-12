@@ -6840,7 +6840,9 @@ describe("AcpAdapterV2", () => {
         });
         const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
         yield* runtime.events.pipe(
-          Stream.runForEach((event) => Queue.offer(events, event)),
+          Stream.runForEach((event) =>
+            Queue.offerAll(events, ProviderAdapter.providerEventMembers(event)),
+          ),
           Effect.forkScoped,
         );
         const providerThread = yield* runtime.ensureThread({
@@ -7024,7 +7026,9 @@ describe("AcpAdapterV2", () => {
           const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
           const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
           yield* runtime.events.pipe(
-            Stream.runForEach((event) => Queue.offer(events, event)),
+            Stream.runForEach((event) =>
+              Queue.offerAll(events, ProviderAdapter.providerEventMembers(event)),
+            ),
             Effect.forkScoped,
           );
           const providerThread = yield* runtime.ensureThread({
@@ -7215,7 +7219,9 @@ describe("AcpAdapterV2", () => {
       const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
       const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
       yield* runtime.events.pipe(
-        Stream.runForEach((event) => Queue.offer(events, event)),
+        Stream.runForEach((event) =>
+          Queue.offerAll(events, ProviderAdapter.providerEventMembers(event)),
+        ),
         Effect.forkScoped,
       );
       const providerThread = yield* runtime.ensureThread({
@@ -7460,7 +7466,9 @@ describe("AcpAdapterV2", () => {
         const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
         const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
         yield* runtime.events.pipe(
-          Stream.runForEach((event) => Queue.offer(events, event)),
+          Stream.runForEach((event) =>
+            Queue.offerAll(events, ProviderAdapter.providerEventMembers(event)),
+          ),
           Effect.forkScoped,
         );
         const providerThread = yield* runtime.ensureThread({
@@ -7740,7 +7748,9 @@ describe("AcpAdapterV2", () => {
         });
         const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
         yield* runtime.events.pipe(
-          Stream.runForEach((event) => Queue.offer(events, event)),
+          Stream.runForEach((event) =>
+            Queue.offerAll(events, ProviderAdapter.providerEventMembers(event)),
+          ),
           Effect.forkScoped,
         );
         const providerThread = yield* runtime.ensureThread({
@@ -9648,7 +9658,9 @@ describe("AcpAdapterV2", () => {
         });
         const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
         yield* runtime.events.pipe(
-          Stream.runForEach((event) => Queue.offer(events, event)),
+          Stream.runForEach((event) =>
+            Queue.offerAll(events, ProviderAdapter.providerEventMembers(event)),
+          ),
           Effect.forkScoped,
         );
         const providerThread = yield* runtime.ensureThread({

@@ -1175,6 +1175,9 @@ describe("OpenCodeAdapterV2", () => {
         });
         yield* harness.startTurn();
         const received = yield* harness.runtime.events.pipe(
+          Stream.flatMap((event) =>
+            Stream.fromIterable(ProviderAdapter.providerEventMembers(event)),
+          ),
           Stream.takeUntil(
             (event) => event.type === "turn_item.updated" && event.turnItem.type === "compaction",
           ),

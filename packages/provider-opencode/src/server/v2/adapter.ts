@@ -1519,10 +1519,6 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           completedAt,
           updatedAt,
         },
-      });
-      yield* emit({
-        type: "turn_item.updated",
-        driver,
         turnItem: {
           id: idAllocator.derive.turnItemFromProviderItem({ driver, nativeItemId: call.nativeId }),
           threadId: turn.input.threadId,

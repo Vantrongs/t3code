@@ -222,7 +222,20 @@ export interface ProviderEventIngestorV2Shape {
       };
     },
   ) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, ProviderEventIngestorV2Error>;
+  /**
+   * Commits every write `ingest` makes in one transaction, then runs what they leave for after
+   * the commit. `ingest` must not take a thread lock: the transaction is open while it runs.
+   */
+  readonly ingestTogether: <A, E, R>(
+    ingest: Effect.Effect<A, E, R>,
+  ) => Effect.Effect<A, E | EventSink.EventSinkV2Error | ProviderEventIngestorV2Error, R>;
 }
+
+// Taking a thread lock inside a write transaction deadlocks a command that holds the lock and waits
+// to write, so ingestTogether runs this work after its commit.
+const AfterCommit = Context.Reference<
+  Array<Effect.Effect<unknown, ProviderEventIngestorV2Error>> | undefined
+>("t3/orchestration-v2/ProviderEventIngestor/AfterCommit", { defaultValue: () => undefined });
 
 export class ProviderEventIngestorV2 extends Context.Service<
   ProviderEventIngestorV2,
@@ -699,6 +712,15 @@ export const layer: Layer.Layer<
 
     return ProviderEventIngestorV2.of({
       normalize,
+      // Runs for each adapter emission; the provider batch owns the span.
+      ingestTogether: Effect.fnUntraced(function* <A, E, R>(ingest: Effect.Effect<A, E, R>) {
+        const afterCommit: Array<Effect.Effect<unknown, ProviderEventIngestorV2Error>> = [];
+        const result = yield* eventSink.withProviderBatch(
+          Effect.provideService(ingest, AfterCommit, afterCommit),
+        );
+        for (const work of afterCommit) yield* work;
+        return result;
+      }),
       ingestNormalized:
         /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
         Effect.fnUntraced(
@@ -802,22 +824,26 @@ export const layer: Layer.Layer<
                   ),
                 ),
               ),
-              // @effect-diagnostics-next-line flatMapConditionalToFilterOrFail:off - The predicate narrows the captured event for the subagent update.
-              Effect.flatMap((storedEvents) =>
-                storedEvents.length === 0 || input.event.type !== "subagent.updated"
-                  ? Effect.succeed(storedEvents)
-                  : syncSubagentThreadModel(input, input.event.subagent).pipe(
-                      Effect.map((synced) => [...storedEvents, ...synced]),
-                      Effect.mapError(
-                        (cause) =>
-                          new ProviderEventPublishError({
-                            providerSessionId: input.providerSessionId,
-                            eventCount: 1,
-                            cause,
-                          }),
-                      ),
-                    ),
-              ),
+              Effect.flatMap((storedEvents) => {
+                if (storedEvents.length === 0 || input.event.type !== "subagent.updated")
+                  return Effect.succeed(storedEvents);
+                const sync = syncSubagentThreadModel(input, input.event.subagent).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderEventPublishError({
+                        providerSessionId: input.providerSessionId,
+                        eventCount: 1,
+                        cause,
+                      }),
+                  ),
+                );
+                return Effect.flatMap(AfterCommit, (afterCommit) => {
+                  if (afterCommit === undefined)
+                    return Effect.map(sync, (synced) => [...storedEvents, ...synced]);
+                  afterCommit.push(sync);
+                  return Effect.succeed(storedEvents);
+                });
+              }),
               Effect.tap((storedEvents) =>
                 Effect.gen(function* () {
                   if (storedEvents.length === 0 || input.event.type !== "provider_turn.updated")

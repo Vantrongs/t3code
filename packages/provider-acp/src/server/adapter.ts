@@ -3404,10 +3404,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               completedAt: subagent.task.completedAt,
             },
           });
-          yield* emitProviderEvent({ type: "subagent.updated", driver, subagent: subagent.task });
           yield* emitProviderEvent({
-            type: "turn_item.updated",
+            type: "subagent.updated",
             driver,
+            subagent: subagent.task,
             turnItem: {
               id: turnItemId,
               threadId: context.input.threadId,
@@ -6061,10 +6061,6 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             type: "subagent.updated",
             driver,
             subagent: subagent.task,
-          });
-          yield* emitProviderEvent({
-            type: "turn_item.updated",
-            driver,
             turnItem: {
               id: subagent.turnItemId,
               threadId: subagent.task.threadId,
