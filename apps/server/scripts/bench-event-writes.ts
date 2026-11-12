@@ -533,6 +533,7 @@ const summarize = (input: {
   const frames = frameCounts.reduce((sum, n) => sum + n, 0);
   const byOwner = new Map<string, number>();
   const byKind = new Map<string, number>();
+  const byOwnerKind = new Map<string, number>();
   let ownerChanged = 0;
   let checkpointPages = 0;
   let checkpoints = 0;
@@ -543,6 +544,7 @@ const summarize = (input: {
       const owner = endOwners.names[endOwners.owners[page] ?? 0]!;
       byOwner.set(owner, (byOwner.get(owner) ?? 0) + 1);
       byKind.set(kind, (byKind.get(kind) ?? 0) + 1);
+      byOwnerKind.set(`${owner} / ${kind}`, (byOwnerKind.get(`${owner} / ${kind}`) ?? 0) + 1);
       if (page <= stamp.pageCount && stamp.names[startOwners[page]!] !== owner) ownerChanged++;
       pending.add(page);
     }
@@ -594,6 +596,7 @@ const summarize = (input: {
     ownerChangedFrames: ownerChanged,
     byOwner: Object.fromEntries([...byOwner].sort((a, b) => b[1] - a[1])),
     byKind: Object.fromEntries([...byKind].sort((a, b) => b[1] - a[1])),
+    byOwnerKind: Object.fromEntries([...byOwnerKind].sort((a, b) => b[1] - a[1])),
     byEventType: Object.fromEntries([...byEventType].sort((a, b) => b[1].frames - a[1].frames)),
     writeMs: {
       total: totalMs,
