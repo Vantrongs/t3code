@@ -84,7 +84,8 @@ export interface EventSinkV2Shape {
     source: Stream.Stream<A, E, R>,
     process: (event: A) => Effect.Effect<void, E2, R2>,
     after: Effect.Effect<boolean, E2, R2>,
-    canBatch: Effect.Effect<boolean, never, R2>,
+    /** Checked on the shared commit worker after each snapshot, so it must not wait. */
+    afterSnapshot: Effect.Effect<boolean, E2, R2>,
   ) => Effect.Effect<
     void,
     E | E2 | ProviderCommitBatch.CommitBatchError | Schema.SchemaError,

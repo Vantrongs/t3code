@@ -234,7 +234,8 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
     source: Stream.Stream<A, E, R>,
     process: (event: A) => Effect.Effect<void, E2, R2>,
     after: Effect.Effect<boolean, E2, R2>,
-    canBatch: Effect.Effect<boolean, never, R2> = Effect.succeed(true),
+    // Runs on the shared worker right after a snapshot, before this consumer's next queued job.
+    afterSnapshot: Effect.Effect<boolean, E2, R2> = Effect.succeed(false),
   ) {
     if (!enabled)
       return yield* source.pipe(
@@ -256,9 +257,7 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
           const processed = yield* Deferred.make<void>();
           const event = signal._tag === "Event" ? signal.event : undefined;
           // EOF only acknowledges prior work; it can share a commit with other consumers.
-          const snapshot =
-            signal._tag === "End" ||
-            (event !== undefined && isSnapshot(event) && (yield* canBatch));
+          const snapshot = signal._tag === "End" || (event !== undefined && isSnapshot(event));
           const bytes =
             snapshot && event !== undefined ? Buffer.byteLength(yield* encodeQueue(event)) : 0;
           const work: Effect.Effect<boolean, E | E2, R2> =
@@ -266,7 +265,17 @@ export const make = Effect.fn("ProviderCommitBatch.make")(function* (
               ? Effect.failCause(signal.cause)
               : event === undefined
                 ? Effect.succeed(true)
-                : process(event).pipe(Effect.as(false));
+                : snapshot
+                  ? process(event).pipe(
+                      Effect.andThen(afterSnapshot),
+                      // Later jobs of this consumer in the same batch must not run.
+                      Effect.tap((stop) =>
+                        Effect.sync(() => {
+                          if (stop) token.active = false;
+                        }),
+                      ),
+                    )
+                  : process(event).pipe(Effect.as(false));
           const reply = snapshot
             ? yield* enqueue(work, token, true, bytes)
             : (yield* enqueue(Effect.void, token, false, 0)).pipe(Effect.andThen(work));

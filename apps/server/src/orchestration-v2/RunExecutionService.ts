@@ -1677,6 +1677,10 @@ export const layer: Layer.Layer<
           yield* trackChildLifecycle(event, deliveredEvent !== null);
           yield* scheduleIdleFlush;
         });
+        const stopsIngestion = Effect.gen(function* () {
+          if (yield* agentTurnsSettled) yield* endPreviewActivity;
+          return yield* shouldStopProviderEventIngestion;
+        });
         const providerEventFiber = yield* eventSink
           .consumeProviderEvents(
             eventSubscription.events.pipe(
@@ -1688,11 +1692,8 @@ export const layer: Layer.Layer<
                 : Effect.gen(function* () {
                     yield* ingestEvent(yield* routeEvent(event));
                   }),
-            Effect.gen(function* () {
-              if (yield* agentTurnsSettled) yield* endPreviewActivity;
-              return yield* shouldStopProviderEventIngestion;
-            }),
-            Ref.get(rootTerminalSeen).pipe(Effect.map((seen) => !seen)),
+            stopsIngestion,
+            stopsIngestion,
           )
           .pipe(
             Effect.ensuring(closeIdleFlush),

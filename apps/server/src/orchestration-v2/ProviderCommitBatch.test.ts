@@ -433,6 +433,45 @@ it.effect.each(["failure", "stop"] as const)(
     }).pipe(Effect.scoped),
 );
 
+it.effect("stops at the snapshot that ends ingestion while later ones wait in its batch", () =>
+  Effect.gen(function* () {
+    const started = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    let first = true;
+    const recorder = yield* recordBatches(
+      Effect.gen(function* () {
+        if (!first) return;
+        first = false;
+        yield* Deferred.succeed(started, undefined);
+        yield* Deferred.await(release);
+      }),
+    );
+    const leading = yield* recorder
+      .consume(Stream.make(event(-1)), recorder.process, Effect.succeed(false))
+      .pipe(Effect.forkScoped({ startImmediately: true }));
+    yield* Deferred.await(started);
+    const pulled = yield* Deferred.make<void>();
+    let arrivals = 0;
+    let processed = 0;
+    const consumer = yield* recorder
+      .consume(
+        Stream.make(event(1), event(2), event(3)).pipe(
+          Stream.tap(() => (++arrivals === 3 ? Deferred.succeed(pulled, undefined) : Effect.void)),
+        ),
+        (raw) => recorder.process(raw).pipe(Effect.tap(() => Effect.sync(() => processed++))),
+        Effect.succeed(false),
+        Effect.sync(() => processed === 2),
+      )
+      .pipe(Effect.forkScoped({ startImmediately: true }));
+    yield* Deferred.await(pulled);
+    yield* TestClock.adjust(0);
+    yield* Deferred.succeed(release, undefined);
+    yield* Fiber.join(leading);
+    yield* Fiber.join(consumer);
+    assert.deepEqual(yield* Queue.takeAll(recorder.output), [[event(-1)], [event(1), event(2)]]);
+  }).pipe(Effect.scoped),
+);
+
 it.effect("does not force a separate commit for every consumer that ends", () =>
   Effect.gen(function* () {
     const pulled = yield* Deferred.make<void>();
