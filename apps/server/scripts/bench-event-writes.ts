@@ -536,7 +536,9 @@ const summarize = (input: {
     checkpoint: {
       checkpoints,
       pages: checkpointPages,
-      pagesPerEvent: checkpointPages / input.events,
+      // The next checkpoint writes the tail too; without it, a run whose last checkpoint lands at
+      // its end reads costlier per event than one that stops just short of it.
+      pagesPerEvent: (checkpointPages + pending.size) / input.events,
       uncheckpointedTailPages: pending.size,
     },
     ownerChangedFrames: ownerChanged,
@@ -648,7 +650,7 @@ const printReport = (report: {
     `frames per commit: p50 ${r.framesPerCommit.p50}, p90 ${r.framesPerCommit.p90}, max ${r.framesPerCommit.max}, mean ${r.framesPerCommit.mean.toFixed(2)}`,
   );
   console.log(
-    `checkpoints (every ${NodeSqliteClient.CHECKPOINT_FRAMES} frames, simulated): ${r.checkpoint.checkpoints}, ${r.checkpoint.pages} pages, ${r.checkpoint.pagesPerEvent.toFixed(2)} per event (tail ${r.checkpoint.uncheckpointedTailPages})`,
+    `checkpoints (every ${NodeSqliteClient.CHECKPOINT_FRAMES} frames, simulated): ${r.checkpoint.checkpoints}, ${r.checkpoint.pages} pages + ${r.checkpoint.uncheckpointedTailPages} in the tail, ${r.checkpoint.pagesPerEvent.toFixed(2)} per event`,
   );
   console.log(
     `repeatability over ${report.runs} runs: ${Object.entries(report.counts)
