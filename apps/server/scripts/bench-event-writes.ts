@@ -10,6 +10,7 @@
 //   run     --base <snapshot.sqlite> --window <window.sqlite> [--runs 3] [--events N] [--out <dir>]
 //           [--reallocate-event-ids]
 //   live    --home <seeded T3 home> --project <git repo> [--model claude-haiku-5-5] [--out <dir>]
+//           [--message <prompt>] [--settle-ms 15000] [--after-ms <settle-ms>]
 //
 // `base` is a `VACUUM INTO` copy of a server database; `record` reads, read-only, the events the
 // live database appended after it. `prepare` migrates the base once with the server's setup.
@@ -43,6 +44,7 @@ const WAL_HEADER_BYTES = 32;
 const FRAME_HEADER_BYTES = 24;
 const FRAME_BYTES = FRAME_HEADER_BYTES + PAGE_SIZE;
 const FREE_PAGE = "(free at end)";
+const WAL_POLL_MS = 5;
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -240,9 +242,10 @@ const pageKind = (page: Buffer, pageNumber: number) => {
   }
 };
 
-// Reads the commits appended since the last call. Callers keep checkpoints from restarting the
-// WAL; frames past the last valid one carry an older salt, and a partial commit waits.
-const makeWalReader = (walPath: string) => {
+// Reads the commits appended since the last call; a partial commit waits. A live server restarts
+// the WAL whenever every frame is backfilled, which a read transaction begun then cannot stop, so
+// live mode follows restarts and checks afterwards that it read every new event row.
+const makeWalReader = (walPath: string, followRestarts = false) => {
   let offset = WAL_HEADER_BYTES;
   let salt: Buffer | undefined;
   return (): Array<Array<Frame>> => {
@@ -255,7 +258,11 @@ const makeWalReader = (walPath: string) => {
       NodeFS.readSync(handle, header, 0, WAL_HEADER_BYTES, 0);
       if (salt === undefined) salt = Buffer.from(header.subarray(16, 24));
       else if (!header.subarray(16, 24).equals(salt)) {
-        throw new Error("the WAL restarted: a checkpoint ran while frames were being counted");
+        if (!followRestarts) {
+          throw new Error("the WAL restarted: a checkpoint ran while frames were being counted");
+        }
+        salt = Buffer.from(header.subarray(16, 24));
+        offset = WAL_HEADER_BYTES;
       }
       const commits: Array<Array<Frame>> = [];
       let current: Array<Frame> = [];
@@ -471,7 +478,7 @@ const replayMain = async () => {
         Layer.provideMerge(
           Layer.provideMerge(
             Sqlite.layerSetup,
-            NodeSqliteClient.layer({ filename: base, readerWorker: true, checkpointWorker: false }),
+            NodeSqliteClient.layer({ filename: base, readerWorker: true }),
           ),
         ),
         Layer.provideMerge(IdAllocator.layer),
@@ -870,6 +877,7 @@ const live = async () => {
   const message = flag("message", DEFAULT_MESSAGE);
   const port = Number(flag("port", "38431"));
   const settleMs = Number(flag("settle-ms", "15000"));
+  const afterMs = Number(flag("after-ms", String(settleMs)));
   const out = NodePath.resolve(flag("out", NodePath.join(home, "..", "live-results")));
   const db = NodePath.join(home, "userdata", "statev2.sqlite");
   if (!NodeFS.existsSync(db)) {
@@ -907,44 +915,52 @@ const live = async () => {
     new NodeSqlite.DatabaseSync(db, { readOnly: true }).exec(
       `VACUUM INTO '${pre.replaceAll("'", "''")}'`,
     );
-    const pin = new NodeSqlite.DatabaseSync(db, { readOnly: true });
-    pin.exec("BEGIN");
-    const startSequence = (
-      pin.prepare("SELECT MAX(sequence) AS s FROM orchestration_events").get() as { s: number }
-    ).s;
+    const startSequence = maxSequence(db);
     const preDb = new NodeSqlite.DatabaseSync(pre, { readOnly: true });
     const preSequence = projectedSequence(preDb);
     preDb.close();
     if (preSequence !== startSequence) {
-      throw new Error("the server appended events between the copy and the pin; raise --settle-ms");
-    }
-    const readFrames = makeWalReader(`${db}-wal`);
-    readFrames();
-    try {
-      const turn = NodeChildProcess.spawnSync(
-        process.execPath,
-        [
-          bin,
-          "thread",
-          "start",
-          "--base-dir",
-          home,
-          project,
-          message,
-          "--provider",
-          provider,
-          "--model",
-          model,
-          "--wait",
-          "--json",
-        ],
-        { cwd: project, encoding: "utf8", timeout: 600_000 },
+      throw new Error(
+        "the server appended events between the copy and the read; raise --settle-ms",
       );
-      NodeFS.writeFileSync(NodePath.join(out, "turn.json"), turn.stdout + turn.stderr);
+    }
+    const readFrames = makeWalReader(`${db}-wal`, true);
+    readFrames();
+    const commits: Array<Array<Frame>> = [];
+    // The server checkpoints after 100 ms without writes and restarts the WAL on its next write.
+    const poll = setInterval(() => commits.push(...readFrames()), WAL_POLL_MS);
+    try {
+      const turn = await new Promise<{ status: number | null; output: string }>((resolve) => {
+        const child = NodeChildProcess.spawn(
+          process.execPath,
+          [
+            bin,
+            "thread",
+            "start",
+            "--base-dir",
+            home,
+            project,
+            message,
+            "--provider",
+            provider,
+            "--model",
+            model,
+            "--wait",
+            "--json",
+          ],
+          { cwd: project, stdio: ["ignore", "pipe", "pipe"], timeout: 600_000 },
+        );
+        let output = "";
+        child.stdout.on("data", (chunk) => (output += chunk));
+        child.stderr.on("data", (chunk) => (output += chunk));
+        child.once("close", (status) => resolve({ status, output }));
+      });
+      NodeFS.writeFileSync(NodePath.join(out, "turn.json"), turn.output);
       if (turn.status !== 0)
         throw new Error(`the turn failed (${turn.status}); see ${out}/turn.json`);
-      await new Promise((resolve) => setTimeout(resolve, settleMs));
-      const commits = readFrames();
+      await new Promise((resolve) => setTimeout(resolve, afterMs));
+      clearInterval(poll);
+      commits.push(...readFrames());
       const endSequence = maxSequence(db);
       const owners = pageOwners(db);
       const ownerOf = (page: number) => owners.names[owners.owners[page] ?? 0]!;
@@ -952,6 +968,21 @@ const live = async () => {
         frames.some(({ page }) => ownerOf(page) === "orchestration_events"),
       );
       const events = endSequence - startSequence;
+      // Every new row sits on a table leaf its commit wrote, so a missing rowid means a WAL
+      // generation was overwritten before it was read.
+      const seen = new Set(
+        commits.flatMap((frames) =>
+          frames.flatMap((frame) =>
+            ownerOf(frame.page) === "orchestration_events" ? (frame.rowids ?? []) : [],
+          ),
+        ),
+      );
+      const missed = [];
+      for (let sequence = startSequence + 1; sequence <= endSequence; sequence++)
+        if (!seen.has(sequence)) missed.push(sequence);
+      if (missed.length > 0) {
+        throw new Error(`frames of ${missed.length} event rows were not read, e.g. ${missed[0]}`);
+      }
       // A commit rewrites the events table's last leaf; the highest rowid on it ends that commit.
       const lastSequences = eventCommits.flatMap((frames) => {
         const rowids = frames.flatMap((frame) =>
@@ -982,7 +1013,7 @@ const live = async () => {
       };
       NodeFS.writeFileSync(NodePath.join(out, "live.json"), JSON.stringify(liveReport, null, 2));
     } finally {
-      pin.close();
+      clearInterval(poll);
     }
   } finally {
     server.kill("SIGTERM");
