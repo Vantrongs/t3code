@@ -574,6 +574,7 @@ describe("RemoteEnvironmentAuthorization", () => {
 
       expect(authorized.httpBaseUrl).toBe("http://192.168.1.10:3773/");
       expect(authorized.socketUrl).toMatch(/^ws:\/\/192\.168\.1\.10:3773\/ws\?/);
+      expect(authorized.socketUrl).toContain("connectionMethod=direct");
       expect(yield* Ref.get(harness.bootstrapCalls)).toBe(0);
       expect(harness.fetch.calls.map(([url]) => String(url))).toEqual([
         "http://192.168.1.10:3773/.well-known/t3/environment",
@@ -634,15 +635,37 @@ describe("RemoteEnvironmentAuthorization", () => {
     }),
   );
 
-  it.effect("reports a failed token request on a learned direct address as a direct failure", () =>
+  it.effect.each([
+    {
+      name: "token request",
+      initialToken: undefined,
+      run: (remote: RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization["Service"]) =>
+        remote
+          .authorizeDpopHttp({ expectedEnvironmentId: ENVIRONMENT_ID, directHttpBaseUrl: LAN })
+          .pipe(Effect.asVoid),
+    },
+    {
+      name: "socket ticket request",
+      initialToken: persistedToken(),
+      run: (remote: RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization["Service"]) =>
+        remote
+          .authorizeDpop({
+            expectedEnvironmentId: ENVIRONMENT_ID,
+            directEndpoint: { httpBaseUrl: LAN, wsBaseUrl: "ws://192.168.1.10:3773/" },
+          })
+          .pipe(Effect.asVoid),
+    },
+  ])("reports a failed $name on a learned direct address as a direct failure", (row) =>
     Effect.gen(function* () {
-      const harness = yield* makeHarness({ descriptor: DESCRIPTOR, responses: [] });
+      const harness = yield* makeHarness({
+        ...(row.initialToken === undefined ? {} : { initialToken: row.initialToken }),
+        descriptor: DESCRIPTOR,
+        responses: [],
+      });
 
       const error = yield* Effect.gen(function* () {
         const remote = yield* RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization;
-        return yield* remote
-          .authorizeDpopHttp({ expectedEnvironmentId: ENVIRONMENT_ID, directHttpBaseUrl: LAN })
-          .pipe(Effect.flip);
+        return yield* row.run(remote).pipe(Effect.flip);
       }).pipe(Effect.provide(harness.layer));
 
       expect(error).toMatchObject({ reason: "network", hop: "server", via: "direct" });

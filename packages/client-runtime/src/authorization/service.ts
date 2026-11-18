@@ -121,10 +121,13 @@ interface IssuedDpopToken {
   readonly descriptor?: ExecutionEnvironmentDescriptor;
 }
 
-function mapDpopSocketError(error: RemoteEnvironmentAuthError | ConnectionAttemptError) {
+function mapDpopSocketError(
+  error: RemoteEnvironmentAuthError | ConnectionAttemptError,
+  connectionMethod: "relay" | "direct",
+) {
   return error._tag === "ConnectionTransientError" || error._tag === "ConnectionBlockedError"
     ? error
-    : mapRemoteDpopEnvironmentError(error);
+    : mapRemoteDpopEnvironmentError(error, connectionMethod);
 }
 
 function approvalPendingError(
@@ -271,8 +274,9 @@ export const make = Effect.gen(function* () {
     function* (
       token: TokenStore.RemoteDpopAccessToken,
       timeoutMs?: number,
-      endpoint: { readonly httpBaseUrl: string; readonly wsBaseUrl: string } = token.endpoint,
+      directEndpoint?: { readonly httpBaseUrl: string; readonly wsBaseUrl: string },
     ) {
+      const endpoint = directEndpoint ?? token.endpoint;
       return yield* resolveRemoteDpopWebSocketConnectionUrl({
         wsBaseUrl: endpoint.wsBaseUrl,
         httpBaseUrl: endpoint.httpBaseUrl,
@@ -288,7 +292,7 @@ export const make = Effect.gen(function* () {
             ),
           ),
         clientMetadata: presentation.metadata,
-        connectionMethod: "relay",
+        connectionMethod: directEndpoint === undefined ? "relay" : "direct",
         ...(timeoutMs === undefined ? {} : { timeoutMs }),
       });
     },
@@ -569,6 +573,7 @@ export const make = Effect.gen(function* () {
     input: Parameters<RemoteEnvironmentAuthorization["Service"]["authorizeDpop"]>[0],
   ) {
     const endpoint = input.directEndpoint;
+    const connectionMethod = endpoint === undefined ? "relay" : "direct";
     const directDescriptor =
       endpoint === undefined
         ? undefined
@@ -609,12 +614,12 @@ export const make = Effect.gen(function* () {
         return cachedSocket.success;
       }
       if (cachedSocket.failure._tag === "ConnectionBlockedError") {
-        return yield* mapDpopSocketError(cachedSocket.failure);
+        return yield* mapDpopSocketError(cachedSocket.failure, connectionMethod);
       }
       // An unreachable direct address says nothing about the token, so keep
       // it for the T3 Connect route rather than forcing a relay round trip.
       if (endpoint !== undefined && cachedSocket.failure._tag !== "EnvironmentAuthInvalidError") {
-        return yield* mapDpopSocketError(cachedSocket.failure);
+        return yield* mapDpopSocketError(cachedSocket.failure, connectionMethod);
       }
       yield* assertSession(selected.identity);
       selected = yield* getDpopToken(
@@ -629,7 +634,7 @@ export const make = Effect.gen(function* () {
           removeRejectedToken(input.expectedEnvironmentId, selected.token.accessToken),
         );
       }
-      return yield* mapDpopSocketError(socket.failure);
+      return yield* mapDpopSocketError(socket.failure, connectionMethod);
     }
     yield* assertSession(selected.identity);
     return socket.success;
