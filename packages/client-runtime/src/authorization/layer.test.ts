@@ -635,6 +635,15 @@ describe("RemoteEnvironmentAuthorization", () => {
     }),
   );
 
+  const authorizeLanSocket = (
+    remote: RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization["Service"],
+  ) =>
+    remote
+      .authorizeDpop({
+        expectedEnvironmentId: ENVIRONMENT_ID,
+        directEndpoint: { httpBaseUrl: LAN, wsBaseUrl: "ws://192.168.1.10:3773/" },
+      })
+      .pipe(Effect.asVoid);
   it.effect.each([
     {
       name: "token request",
@@ -645,22 +654,22 @@ describe("RemoteEnvironmentAuthorization", () => {
           .pipe(Effect.asVoid),
     },
     {
-      name: "socket ticket request",
+      name: "socket ticket request with a cached token",
       initialToken: persistedToken(),
-      run: (remote: RemoteEnvironmentAuthorization.RemoteEnvironmentAuthorization["Service"]) =>
-        remote
-          .authorizeDpop({
-            expectedEnvironmentId: ENVIRONMENT_ID,
-            directEndpoint: { httpBaseUrl: LAN, wsBaseUrl: "ws://192.168.1.10:3773/" },
-          })
-          .pipe(Effect.asVoid),
+      run: authorizeLanSocket,
+    },
+    {
+      name: "socket ticket request after a fresh mint",
+      initialToken: persistedToken({ expiresAtEpochMs: 0 }),
+      responses: [accessToken("lan-minted")],
+      run: authorizeLanSocket,
     },
   ])("reports a failed $name on a learned direct address as a direct failure", (row) =>
     Effect.gen(function* () {
       const harness = yield* makeHarness({
         ...(row.initialToken === undefined ? {} : { initialToken: row.initialToken }),
         descriptor: DESCRIPTOR,
-        responses: [],
+        responses: row.responses ?? [],
       });
 
       const error = yield* Effect.gen(function* () {
