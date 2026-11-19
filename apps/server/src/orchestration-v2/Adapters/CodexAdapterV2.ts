@@ -3172,6 +3172,47 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             });
           });
 
+        const recoverSubagent = Effect.fnUntraced(function* (nativeThreadId: string) {
+          if (!input.readNativeSubagent) return;
+          const childThreadId = idAllocator.derive.subagentThread({
+            driver: CODEX_PROVIDER,
+            nativeThreadId,
+          });
+          const saved = yield* input.readNativeSubagent(childThreadId);
+          if (!saved?.task.nativeTaskRef) return;
+          const parentId = saved.providerThread.forkedFrom?.providerThreadId;
+          const parentContext = Array.from((yield* Ref.get(activeTurns)).values()).find(
+            (turn) =>
+              turn.providerThread.id === parentId &&
+              turn.projectionThreadId === saved.task.threadId,
+          );
+          if (!parentContext) return;
+          markSubagentUsage(parentContext);
+          const subagent: CodexSubagentThreadContext = {
+            parentContext,
+            providerThread: saved.providerThread,
+            childThread: saved.childThread,
+            childThreadId,
+            task: saved.task,
+            subagentNodeId: saved.task.id,
+            childRootNodeId: idAllocator.derive.nodeFromProviderItem({
+              driver: CODEX_PROVIDER,
+              nativeItemId: `${saved.task.nativeTaskRef.nativeId}:thread-root`,
+            }),
+            startedAt: saved.task.startedAt ?? saved.task.updatedAt,
+            nativeTurnIds: new Set(),
+            turnItemId: saved.turnItemId,
+            turnItemOrdinal: saved.turnItemOrdinal,
+          };
+          yield* Ref.update(nextProviderTurnOrdinals, (current) =>
+            new Map(current).set(saved.providerThread.id, saved.lastTurnOrdinal),
+          );
+          yield* Ref.update(subagentThreads, (current) =>
+            new Map(current).set(nativeThreadId, subagent),
+          );
+          return subagent;
+        });
+
         const rememberSubagentTurnStarted =
           /* Provider events include streaming deltas; avoid a span for each update. */
           Effect.fnUntraced(function* (input: {
@@ -3179,7 +3220,9 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             readonly nativeTurnId: string;
             readonly startedAt: DateTime.Utc;
           }) {
-            const subagent = (yield* Ref.get(subagentThreads)).get(input.nativeThreadId);
+            const subagent =
+              (yield* Ref.get(subagentThreads)).get(input.nativeThreadId) ??
+              (yield* recoverSubagent(input.nativeThreadId));
             if (subagent !== undefined) {
               yield* emitSubagentProviderTurnStarted(subagent, input);
               return;
@@ -3584,6 +3627,18 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 ordinal,
                 emitInitialPrompt: false,
               });
+              return;
+            }
+
+            // The parent can finish between sending a follow-up and the child starting its turn.
+            if (input.context && input.item.kind === "interacted") {
+              const target = input.item.agentThreadId;
+              if (
+                !(yield* Ref.get(subagentThreads)).has(target) &&
+                !rootProviderThreads.has(target)
+              ) {
+                yield* recoverSubagent(target);
+              }
               return;
             }
 

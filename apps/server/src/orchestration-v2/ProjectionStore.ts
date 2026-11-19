@@ -1,3 +1,4 @@
+import type { PersistedNativeSubagent } from "@t3tools/provider-core/server/ProviderAdapter";
 import type { ProjectThreadAwarenessV2Input } from "@t3tools/shared/agentAwareness";
 import { applyOrchestrationV2ThreadVisit, pendingGuestMessageCount } from "@t3tools/contracts";
 import { applyThreadPullRequestLinkUpdate } from "../sourceControl/threadPullRequests.ts";
@@ -537,6 +538,10 @@ export interface ProjectionStoreV2Shape {
     threadId: ThreadId,
     limit: number,
   ) => Effect.Effect<number, ProjectionStoreV2Error>;
+  readonly readNativeSubagent: (
+    childThreadId: ThreadId,
+    instanceId: ProviderInstanceId,
+  ) => Effect.Effect<PersistedNativeSubagent | undefined, ProjectionStoreV2Error>;
   readonly getSubagentCount: (threadId: ThreadId) => Effect.Effect<number, ProjectionStoreV2Error>;
   readonly getRunCount: (threadId: ThreadId) => Effect.Effect<number, ProjectionStoreV2Error>;
   /** Child threads of the thread's app-owned tasks, in task order, without decoding the tasks. */
@@ -6408,6 +6413,39 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         Effect.map((rows) => rows[0]?.count ?? 0),
         Effect.mapError(controlReadError(threadId)),
       );
+    const readNativeSubagent: ProjectionStoreV2Shape["readNativeSubagent"] = Effect.fn(
+      "ProjectionStore.readNativeSubagent",
+    )(
+      function* (childThreadId, instanceId) {
+        const [row] = yield* sql<{
+          task: string;
+          child: string;
+          provider: string;
+          item_id: string;
+          item_ordinal: number;
+          last_turn: number;
+        }>`SELECT s.payload_json AS task, c.payload_json AS child, p.payload_json AS provider,
+                i.turn_item_id AS item_id, i.ordinal AS item_ordinal,
+                COALESCE((SELECT MAX(ordinal) FROM orchestration_v2_projection_provider_turns
+                   WHERE provider_thread_id = p.provider_thread_id), 0) AS last_turn
+         FROM orchestration_v2_projection_subagents s
+         JOIN orchestration_v2_projection_threads c ON c.thread_id = s.child_thread_id
+         JOIN orchestration_v2_projection_provider_threads p ON p.provider_thread_id = s.provider_thread_id
+         JOIN orchestration_v2_projection_turn_items i ON i.node_id = s.subagent_id AND i.type = 'subagent'
+         WHERE s.child_thread_id = ${childThreadId} AND s.provider_instance_id = ${instanceId}
+           AND s.origin = 'provider_native'`;
+        if (!row) return undefined;
+        return {
+          task: yield* decodeSubagentPayload(row.task),
+          childThread: yield* decodeThreadPayload(row.child),
+          providerThread: yield* decodeProviderThreadPayload(row.provider),
+          turnItemId: TurnItemId.make(row.item_id),
+          turnItemOrdinal: row.item_ordinal,
+          lastTurnOrdinal: row.last_turn,
+        };
+      },
+      (effect, childThreadId) => effect.pipe(Effect.mapError(controlReadError(childThreadId))),
+    );
     const getSubagentCount: ProjectionStoreV2Shape["getSubagentCount"] = (threadId) =>
       sql<{
         count: number;
@@ -9518,6 +9556,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       isNodeStored: readOnReader(isNodeStored),
       getMessageCount: readOnReader(getMessageCount),
       getTranscriptByteFloor: readOnReader(getTranscriptByteFloor),
+      readNativeSubagent: readOnReader(readNativeSubagent),
       getSubagentCount: readOnReader(getSubagentCount),
       getRunCount: readOnReader(getRunCount),
       listAppOwnedChildThreadIds: readOnReader(listAppOwnedChildThreadIds),

@@ -3053,6 +3053,10 @@ export const layerWithOptions = (
                     modelSelection: input.modelSelection,
                     runtimePolicy: input.runtimePolicy,
                     promptSuggestions: promptSuggestionsEnabled,
+                    readNativeSubagent: (childThreadId) =>
+                      projectionStore
+                        .readNativeSubagent(childThreadId, input.modelSelection.instanceId)
+                        .pipe(Effect.orDie),
                     ...(input.resumeFromSession === undefined
                       ? {}
                       : { resumeFromSession: input.resumeFromSession }),

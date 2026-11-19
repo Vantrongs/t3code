@@ -519,7 +519,19 @@ export const ProviderAdapterV2Error = Schema.Union([
 ]);
 export type ProviderAdapterV2Error = typeof ProviderAdapterV2Error.Type;
 
+export interface PersistedNativeSubagent {
+  readonly task: OrchestrationV2Subagent;
+  readonly childThread: OrchestrationV2AppThread;
+  readonly providerThread: OrchestrationV2ProviderThread;
+  readonly turnItemId: TurnItemId;
+  readonly turnItemOrdinal: number;
+  readonly lastTurnOrdinal: number;
+}
+
 export interface ProviderAdapterV2OpenSessionInput {
+  readonly readNativeSubagent?: (
+    childThreadId: ThreadId,
+  ) => Effect.Effect<PersistedNativeSubagent | undefined>;
   readonly threadId: ThreadId;
   readonly providerSessionId: ProviderSessionId;
   readonly modelSelection: ModelSelection;

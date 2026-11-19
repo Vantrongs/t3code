@@ -1459,7 +1459,15 @@ describe("CodexAdapterV2 post-settle continuation", () => {
   });
 
   const makeCodexReplayHarness = (
-    transcript: CodexReplay.CodexAppServerReplayTranscript,
+    source:
+      | CodexReplay.CodexAppServerReplayTranscript
+      | {
+          transcript: CodexReplay.CodexAppServerReplayTranscript;
+          sessionOptions: Pick<
+            ProviderAdapter.ProviderAdapterV2OpenSessionInput,
+            "readNativeSubagent"
+          >;
+        },
     onEvent: (event: ProviderAdapter.ProviderAdapterV2Event) => Effect.Effect<unknown> = () =>
       Effect.void,
     onRequest: (method: string, params: unknown) => Effect.Effect<void> = () => Effect.void,
@@ -1471,6 +1479,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     models?: CodexAdapterV2.CodexAdapterV2Options["models"],
   ) =>
     Effect.gen(function* () {
+      const transcript = "transcript" in source ? source.transcript : source;
       const fileSystem = yield* FileSystem.FileSystem;
       const idAllocator = yield* IdAllocator.IdAllocatorV2;
       const serverConfig = yield* ProviderReplayHarness.makeReplayServerConfig(
@@ -1555,6 +1564,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         modelSelection: CODEX_TEST_MODEL_SELECTION,
         runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
         promptSuggestions,
+        ...("transcript" in source && source.sessionOptions),
       });
       const providerThread = yield* runtime.ensureThread({
         threadId,
@@ -9974,6 +9984,143 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             1,
           );
         }
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
+        ),
+      ),
+  );
+
+  it.effect.each([false, true])(
+    "reopens the persisted child in a fresh session (parent already finished: %s)",
+    (afterParent) =>
+      Effect.gen(function* () {
+        const entries = resumeSubagentTranscript.entries;
+        const index = (label: string) =>
+          entries.findIndex((entry) => entry.type === "emit_inbound" && entry.label === label);
+        const first = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: RESUME_SCENARIO,
+            entries: entries.slice(0, index("turn/completed/root") + 1),
+          }),
+        );
+        const start = (harness: typeof first) =>
+          Effect.gen(function* () {
+            yield* harness.runtime.startTurn(
+              makeCodexTestTurnInput({
+                threadId: harness.threadId,
+                providerThread: harness.providerThread,
+                now: yield* DateTime.now,
+                attemptId: RunAttemptId.make("attempt-restart"),
+                text: RESUME_PROMPT,
+              }),
+            );
+          });
+        yield* start(first);
+        yield* TestClock.adjust("100 millis");
+        yield* first.awaitTerminal(1);
+        const task = first.subagentUpdates().at(-1)!.subagent;
+        const child = first.events.find((e) => e.type === "app_thread.created");
+        const provider = first.events.find(
+          (e) =>
+            e.type === "provider_thread.updated" && e.providerThread.id === task.providerThreadId,
+        );
+        const item = first.events.find(
+          (e) =>
+            e.type === "turn_item.updated" &&
+            e.turnItem.nodeId === task.id &&
+            e.turnItem.type === "subagent",
+        );
+        assert.equal(task.status, "completed");
+        assert(
+          child?.type === "app_thread.created" &&
+            provider?.type === "provider_thread.updated" &&
+            item?.type === "turn_item.updated",
+        );
+        const sessionOptions: Pick<
+          ProviderAdapter.ProviderAdapterV2OpenSessionInput,
+          "readNativeSubagent"
+        > = {
+          readNativeSubagent: (id) =>
+            Effect.succeed(
+              id === task.childThreadId
+                ? {
+                    task,
+                    childThread: child.appThread,
+                    providerThread: provider.providerThread,
+                    turnItemId: item.turnItem.id,
+                    turnItemOrdinal: item.turnItem.ordinal,
+                    lastTurnOrdinal: 1,
+                  }
+                : undefined,
+            ),
+        };
+        const restarted = yield* makeCodexReplayHarness({
+          sessionOptions,
+          transcript: makeCodexReplayTranscript({
+            scenario: RESUME_SCENARIO,
+            entries: [
+              ...entries.slice(0, index("item/completed/subAgentActivity-started")),
+              ...(afterParent
+                ? [
+                    {
+                      type: "emit_inbound" as const,
+                      label: "interaction",
+                      frame: {
+                        method: "item/started",
+                        params: {
+                          threadId: RESUME_NATIVE_THREAD,
+                          turnId: RESUME_NATIVE_TURN,
+                          startedAtMs: 1782622469000,
+                          item: {
+                            type: "subAgentActivity",
+                            id: "new-interaction",
+                            kind: "interacted",
+                            agentThreadId: RESUME_CHILD_THREAD,
+                            agentPath: "/root/resume_agent",
+                          },
+                        },
+                      },
+                    },
+                    entries[index("turn/completed/root")]!,
+                  ]
+                : []),
+              childTurnStarted(RESUME_CHILD_TURN_2),
+              childAgentMessage({
+                id: "new-answer",
+                text: "RESUMED",
+                turnId: RESUME_CHILD_TURN_2,
+                completedAtMs: 1782622480000,
+              }),
+              childTurnCompleted(RESUME_CHILD_TURN_2),
+              ...(afterParent ? [] : [entries[index("turn/completed/root")]!]),
+            ],
+          }),
+        });
+        yield* start(restarted);
+        yield* restarted.awaitTerminal(1);
+        if (afterParent)
+          yield* restarted.until(
+            () => restarted.subagentUpdates().at(-1)?.subagent.result === "RESUMED",
+          );
+        const updates = restarted.subagentUpdates().map((e) => e.subagent);
+        assert.equal(updates[0]?.id, task.id);
+        assert.equal(updates[0]?.status, "running");
+        assert.equal(updates.at(-1)?.result, "RESUMED");
+        assert.isTrue(
+          restarted.events.some(
+            (e) =>
+              e.type === "provider_turn.updated" &&
+              e.providerTurn.providerThreadId === task.providerThreadId &&
+              e.providerTurn.ordinal === 2,
+          ),
+        );
+        assert.isFalse(restarted.events.some((e) => e.type === "app_thread.created"));
       }).pipe(
         Effect.provide(
           Layer.mergeAll(
